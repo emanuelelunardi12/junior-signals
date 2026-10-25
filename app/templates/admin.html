@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% from "_signal.html" import strata %}
+{% block main %}
+{% if msg %}<p class="banner" role="status">{{ msg }}</p>{% endif %}
+
+<div class="adminhead">
+  <h1>Review queue</h1>
+  <p class="small">{{ stats.users.n }} user{{ 's' if stats.users.n != 1 }}, {{ stats.users.reachable or 0 }} reachable on Telegram</p>
+</div>
+
+{% for s in pending %}
+<article class="review tier-{{ s.tier }}">
+  <p class="meta"><span class="ticker">{{ s.ticker }}</span> <span>{{ event_types.get(s.event_type, s.event_type) }}</span>
+    <b class="scorepill">{{ s.score }}</b> <a href="{{ s.url }}" target="_blank" rel="noopener">Open source</a></p>
+
+  <form method="post" action="/admin/signal/{{ s.id }}/edit" class="editform">
+    <label>Headline<textarea name="headline" rows="2" required>{{ s.headline }}</textarea></label>
+    {{ strata(s.breakdown) }}
+    <div class="row">
+      <label>Score adjustment<input type="number" name="adjustment" min="-10" max="10" value="0"></label>
+      <label class="grow">Reason (shown to users)<input name="reason" placeholder="e.g. second strategic investor this year"></label>
+      <button>Save changes</button>
+    </div>
+  </form>
+
+  {% set f = s.fields | fromjson %}
+  <details><summary>Extracted facts and quotes</summary>
+    <dl class="quotes">
+      {% for k, q in f.get('_quotes', {}).items() %}<dt>{{ k | field_label }}: {{ field_value(k, f[k]) }}</dt><dd>“{{ q }}”</dd>{% endfor %}
+    </dl>
+    {% set rej = s.rejected | fromjson %}
+    {% if rej %}
+      <p class="small">Rejected by the checks:</p>
+      <dl class="quotes rejected">{% for r in rej %}<dt>{{ r.field }}: {{ r.value }}</dt><dd>{{ r.reason }}</dd>{% endfor %}</dl>
+    {% endif %}
+  </details>
+
+  <div class="actions publish">
+    <form method="post" action="/admin/signal/{{ s.id }}/send">
+      <button class="primary">Send to watchers ({{ reach[s.id].watchers }})</button></form>
+    <form method="post" action="/admin/signal/{{ s.id }}/feed"><button>Add to feed only</button></form>
+    <form method="post" action="/admin/signal/{{ s.id }}/broadcast"
+          onsubmit="return confirm('Send this to all {{ reach[s.id].broadcast }} reachable users?')">
+      <button>Broadcast to everyone ({{ reach[s.id].broadcast }})</button></form>
+    <form method="post" action="/admin/signal/{{ s.id }}/reject"><button class="quiet">Reject</button></form>
+  </div>
+  <p class="small">Watchers are users following {{ s.ticker }} whose alert threshold is {{ s.score }} or lower. Save changes before sending.</p>
+</article>
+{% else %}
+<div class="empty"><h2>Nothing to review</h2><p>Alert-tier signals from the pipeline and signals you create below appear here.</p></div>
+{% endfor %}
+
+<section class="panel">
+  <h2>Create a signal from a document</h2>
+  <p class="small">For filings and releases you read yourself (SEDAR+, SEDI, company sites). The text goes through the same checks and scoring, then waits here for review.</p>
+  <form method="post" action="/admin/new" class="stack wide">
+    <div class="row">
+      <label>Ticker<select name="ticker">{% for u in universe %}<option value="{{ u.symbol }}">{{ u.symbol }}  {{ u.name }}</option>{% endfor %}</select></label>
+      <label>Event type<select name="event_type">
+        <option value="auto">Let the AI classify it</option>
+        {% for k, v in event_types.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+      </select></label>
+    </div>
+    <label>Source link<input name="url" type="url" required placeholder="https://"></label>
+    <label>Title<input name="title"></label>
+    <label>Full text<textarea name="text" rows="8" required></textarea></label>
+    <button class="primary">Create signal</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Documents the AI skipped</h2>
+  <p class="small">Checking a sample of these each week is the only way we catch events the classifier missed. If one is a real event, choose its type and promote it.</p>
+  {% if noise %}
+  <table class="stats">
+    {% for d in noise %}
+    <tr><th><a href="{{ d.url }}" target="_blank" rel="noopener">{{ d.ticker }}</a></th>
+      <td>{{ d.title or d.url }}
+        <form method="post" action="/admin/noise/{{ d.id }}/promote" class="inline">
+          <select name="event_type" aria-label="Event type">
+            {% for k, v in event_types.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+          </select>
+          <button>Promote</button>
+        </form>
+      </td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="small">Nothing skipped yet.</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h2>Announcement to all users</h2>
+  <p class="small">Not tied to a ticker: new tickers covered, downtime, a survey. Keep these rare.</p>
+  <form method="post" action="/admin/announce" class="stack wide"
+        onsubmit="return confirm('Send this announcement to all {{ stats.users.reachable or 0 }} reachable users?')">
+    <label>Message<textarea name="text" rows="3" required></textarea></label>
+    <button>Send announcement</button>
+  </form>
+  {% if announcements %}
+  <table class="stats">{% for a in announcements %}<tr><th>{{ a.created_at[:10] }}</th><td>{{ a.text }} ({{ a.recipients }} sent)</td></tr>{% endfor %}</table>
+  {% endif %}
+</section>
+
+<h2>Pipeline</h2>
+<p class="small"><a href="/admin/tuning">Open the weight tuning report</a></p>
+<table class="stats">
+  <tr><th>Documents</th><td>{% for d in stats.docs %}{{ d.status }} {{ d.n }}{{ ', ' if not loop.last }}{% else %}none yet{% endfor %}</td></tr>
+  <tr><th>Feedback</th><td>{{ stats.feedback.up or 0 }} useful of {{ stats.feedback.n }} ratings</td></tr>
+  <tr><th>AI usage</th><td>{% for u in stats.usage %}{{ u.stage }} ({{ u.model }}): {{ u.calls }} calls, {{ u.i }} in / {{ u.o }} out tokens<br>{% else %}none yet{% endfor %}</td></tr>
+  <tr><th>Requested tickers</th><td>{% for r in stats.requests %}{{ r.symbol }} ({{ r.n }}){{ ', ' if not loop.last }}{% else %}none{% endfor %}</td></tr>
+</table>
+
+<h2>Recently decided</h2>
+<table class="stats">
+  {% for s in recent %}<tr><th>{{ s.ticker }}</th><td>{{ s.score }}, {{ s.status }}{% if s.status == 'approved' %}, {% if s.delivery == 'feed_only' %}feed only{% elif s.delivery == 'broadcast' %}broadcast{% elif s.published_at %}sent to watchers{% else %}dashboard only (below alert level){% endif %}{% endif %}: {{ s.headline }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

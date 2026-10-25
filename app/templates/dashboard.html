@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% from "_signal.html" import card %}
+{% block main %}
+{% if not user.can_message %}
+<p class="banner">Alerts can't reach you yet.
+  {% if bot_link %}<a href="{{ bot_link }}">Open the bot in Telegram and tap Start</a>, then refresh this page.
+  {% else %}No Telegram bot is connected to this app yet; signals still appear here.{% endif %}</p>
+{% endif %}
+
+<nav class="tabs" aria-label="Watchlist">
+  <a href="/dashboard" class="{{ 'current' if not active }}">All</a>
+  {% for t in watchlist %}<a href="/dashboard?t={{ t }}" class="{{ 'current' if active == t }}">{{ t }}</a>{% endfor %}
+</nav>
+
+<div class="layout">
+  <section class="feed">
+    {% if active %}
+      <div class="tickerhead">
+        <h1>{{ active }} <span>{{ names.get(active, '') }}</span></h1>
+        <form method="post" action="/watchlist/remove"><input type="hidden" name="symbol" value="{{ active }}">
+          <button class="quiet">Remove from watchlist</button></form>
+      </div>
+    {% endif %}
+    {% for s in signals %}
+      {{ card(s, names, feedback.get(s.id)) }}
+    {% else %}
+      <div class="empty">
+        {% if not watchlist %}
+          <h2>Add your first ticker</h2><p>Pick the names you trade from the list on the right. New signals on them appear here and in Telegram.</p>
+          {% if dev_login %}
+          <form method="post" action="/dev/demo"><button class="primary">Load demo data</button></form>
+          <p class="small">Development only: adds example signals and puts EXMP.V and DEMO on your watchlist.</p>
+          {% endif %}
+        {% else %}
+          <h2>No signals yet</h2><p>Nothing has cleared the scoring bar on {{ active or 'your watchlist' }}. We check sources every few hours.</p>
+          {% if dev_login %}<form method="post" action="/dev/demo"><button>Load demo data</button></form>{% endif %}
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+
+  <aside>
+    <h2>Add a ticker</h2>
+    {% if universe %}
+    <form method="post" action="/watchlist/add" class="stack">
+      <select name="symbol" aria-label="Ticker">
+        {% for u in universe %}<option value="{{ u.symbol }}">{{ u.symbol }}  {{ u.name }}</option>{% endfor %}
+      </select>
+      <button>Add to watchlist</button>
+    </form>
+    {% else %}<p class="small">You follow every ticker we track.</p>{% endif %}
+
+    <h2>Alerts</h2>
+    <form method="post" action="/settings" class="stack">
+      <label>Send me alerts for scores of
+        <input type="number" name="alert_threshold" min="1" max="20" value="{{ user.alert_threshold }}"> or more</label>
+      <label class="check"><input type="checkbox" name="paused" {{ 'checked' if user.paused }}> Pause alerts</label>
+      <button>Save alert settings</button>
+    </form>
+    <p class="small">Scores of 8 or more are checked by a person before they're sent. Information only, not investment advice.</p>
+  </aside>
+</div>
+{% endblock %}

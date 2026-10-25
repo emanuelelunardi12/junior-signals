@@ -1,0 +1,7 @@
+doc,event_type,field,value
+example_strategic.txt,strategic_investment,counterparty_name,Big Copper Mining Ltd.
+example_strategic.txt,strategic_investment,stake_pct,9.9
+example_strategic.txt,strategic_investment,amount_millions,12.5
+example_strategic.txt,strategic_investment,currency,CAD
+example_strategic.txt,strategic_investment,price_vs_market,premium
+example_strategic.txt,strategic_investment,board_seat,true

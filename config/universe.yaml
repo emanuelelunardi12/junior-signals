@@ -1,0 +1,30 @@
+# The tickers we track. Users can only add tickers listed here (others are logged as requests).
+# Fill in from your interviewees' watchlists.
+#
+# rss:     company or search RSS feeds from newswires (Newsfile, GlobeNewswire, Accesswire...).
+#          Find the feed on the newswire's company page; check each site's terms of use.
+# match:   optional keywords; an RSS item is kept only if its title/summary contains one.
+#          Useful when a feed covers several companies.
+# cik:     SEC Central Index Key, only for SEC filers (US-listed or cross-listed names).
+# market_cap_musd: rough market cap in USD millions, used for the "large relative to market cap" rule.
+#          Update manually for now.
+# price_symbol: symbol for the price source (Stooq), e.g. exmp.v for TSX-V, demo.us for US names.
+#          Leave empty to skip the "already moved" rule for that ticker.
+
+tickers:
+  - symbol: EXMP.V
+    name: Example Copper Corp
+    exchange: TSXV
+    commodity: copper
+    market_cap_musd: 45
+    price_symbol: exmp.v
+    rss: []
+    match: ["Example Copper"]
+  - symbol: DEMO
+    name: Demo Energy Inc
+    exchange: NYSE American
+    commodity: oil_gas
+    market_cap_musd: 120
+    price_symbol: demo.us
+    cik: null
+    rss: []

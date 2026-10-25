@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block main %}
+<section class="login">
+  <h1>Early signals on junior mining and energy stocks</h1>
+  <p class="lede">Strategic stakes, ownership changes and key hires on the names you follow, read from primary
+    sources and sent to Telegram, each with the reason it scored the way it did.</p>
+  {% if error %}<p class="error">Telegram login could not be verified. Try again.</p>{% endif %}
+  {% if bot_username %}
+    <script async src="https://telegram.org/js/telegram-widget.js?22"
+            data-telegram-login="{{ bot_username }}" data-size="large" data-radius="6"
+            data-auth-url="{{ auth_url }}" data-request-access="write"></script>
+    <p class="small">You'll be asked to let the bot message you. That's how alerts reach you.</p>
+  {% else %}
+    <p class="small">No bot configured yet: set TELEGRAM_BOT_USERNAME in <code>.env</code> to show the Telegram login button.</p>
+  {% endif %}
+  {% if not bot_username and not dev_login %}
+    <p class="banner">Nothing to log in with. For local testing, copy the example settings and restart the server:
+      <code>cp .env.example .env</code> (it sets DEV_LOGIN=1). For real users, follow the Telegram setup in the README.</p>
+  {% endif %}
+  {% if dev_login %}
+  <form class="dev" method="post" action="/dev-login">
+    <p class="small">Development only: log in as a test user.</p>
+    <input name="user_id" type="number" value="1001" aria-label="Test user id">
+    <input name="first_name" value="Tester" aria-label="Name">
+    <button>Log in as test user</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

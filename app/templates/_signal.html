@@ -1,0 +1,48 @@
+{% macro strata(breakdown) -%}
+  {% set parts = breakdown | fromjson %}
+  {% set gross = parts | map(attribute=1) | map('abs') | sum %}
+  <div class="strata" role="img" aria-label="Score breakdown" style="width: min(100%, {{ gross * 1.6 }}rem)">
+    {% for label, pts in parts if pts > 0 %}
+      <span class="layer l{{ loop.index0 % 5 }}" style="flex-grow: {{ pts }}" title="+{{ pts }} {{ label }}"></span>
+    {% endfor %}
+    {% for label, pts in parts if pts < 0 %}
+      <span class="layer neg" style="flex-grow: {{ -pts }}" title="{{ pts }} {{ label }}"></span>
+    {% endfor %}
+  </div>
+  <ul class="why">
+    {% for label, pts in parts %}
+      <li><span class="pts {{ 'minus' if pts < 0 }}">{{ '+' if pts >= 0 }}{{ pts }}</span>{{ label }}</li>
+    {% endfor %}
+  </ul>
+{%- endmacro %}
+
+{% macro card(s, names, fb=None, show_feedback=True) -%}
+<article class="signal tier-{{ s.tier }}">
+  <div class="score"><b>{{ s.score }}</b></div>
+  <div class="body">
+    <p class="meta"><a class="ticker" href="/dashboard?t={{ s.ticker }}">{{ s.ticker }}</a>
+      <span>{{ names.get(s.ticker, '') }}</span>
+      <time>{{ s.created_at[:10] }}</time></p>
+    <h3>{{ s.headline }}</h3>
+    <details>
+      <summary>Why this score</summary>
+      {{ strata(s.breakdown) }}
+      {% set f = s.fields | fromjson %}
+      {% if f.get('_quotes') %}
+      <dl class="quotes">
+        {% for k, q in f['_quotes'].items() if k != 'headline' %}
+          <dt>{{ k | field_label }}: {{ field_value(k, f[k]) }}</dt><dd>“{{ q }}”</dd>
+        {% endfor %}
+      </dl>
+      {% endif %}
+    </details>
+    <div class="actions">
+      <a href="{{ s.url }}" target="_blank" rel="noopener">Read source</a>
+      {% if show_feedback %}
+      <form method="post" action="/feedback/{{ s.id }}/1"><button class="{{ 'on' if fb == 1 }}">Useful</button></form>
+      <form method="post" action="/feedback/{{ s.id }}/0"><button class="{{ 'on' if fb == 0 }}">Not useful</button></form>
+      {% endif %}
+    </div>
+  </div>
+</article>
+{%- endmacro %}

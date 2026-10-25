@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Weight tuning report</h1>
+<p class="small">What users actually found useful. Use it to replace our starting guesses in <code>app/scoring.py</code>,
+and write every change in <code>docs/prompt_log.md</code>. Treat small samples with care: under about 20 ratings
+in a row, the percentage means little.</p>
+
+<h2>By event type</h2>
+<table class="stats">
+  <tr><th>Event type</th><td><b>Useful</b></td></tr>
+  {% for r in by_event %}
+  <tr><th>{{ event_types.get(r.event_type, r.event_type) }}</th>
+    <td>{{ r.up or 0 }} of {{ r.n }}{% if r.n %} ({{ ((r.up or 0) / r.n * 100) | round | int }}%){% endif %}</td></tr>
+  {% else %}<tr><th>No ratings yet</th><td>Signals need Useful / Not useful taps first.</td></tr>{% endfor %}
+</table>
+
+<h2>By scoring rule</h2>
+<p class="small">Each rule counts every rated signal whose score included it, so a signal appears under several rules.</p>
+<table class="stats">
+  <tr><th>Rule</th><td><b>Useful</b></td></tr>
+  {% for label, n, up in by_rule %}
+  <tr><th>{{ label }}</th><td>{{ up }} of {{ n }} ({{ (up / n * 100) | round | int }}%)</td></tr>
+  {% else %}<tr><th>No ratings yet</th><td></td></tr>{% endfor %}
+</table>
+
+<p class="small">{{ unrated }} sent signal{{ 's' if unrated != 1 }} with no rating. If this stays high, ask users directly;
+silence is not the same as "not useful".</p>
+{% endblock %}

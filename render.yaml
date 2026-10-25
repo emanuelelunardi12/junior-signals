@@ -1,0 +1,36 @@
+# Render deployment. Set the secret variables in the dashboard, never in this file.
+services:
+  - type: web
+    name: junior-signals
+    runtime: docker
+    plan: starter            # a paid plan is needed for the persistent disk below
+    healthCheckPath: /
+    disk:
+      name: data
+      mountPath: /data       # keeps the SQLite database across deploys
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /data/signals.db
+      - key: RUN_SCHEDULER
+        value: "1"
+      - key: PIPELINE_INTERVAL_HOURS
+        value: "4"
+      - key: DEV_LOGIN
+        value: "0"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_IDS
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: SEC_USER_AGENT
+        sync: false
