@@ -27,3 +27,16 @@ def test_expired_login_rejected(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:abc")
     data = {"id": "42", "auth_date": str(int(time.time()) - 200000)}
     assert telegram.verify_login({**data, "hash": sign(data, "123:abc")}) is None
+
+
+def test_no_bot_token_means_no_login_even_with_a_correct_looking_hash(monkeypatch):
+    """With an empty token the signing key would be SHA256(""), which anyone can compute."""
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
+    data = {"id": "1", "first_name": "Admin", "auth_date": str(int(time.time()))}
+    assert telegram.verify_login({**data, "hash": sign(data, "")}) is None
+
+
+def test_old_login_links_cannot_be_replayed(monkeypatch):
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:abc")
+    data = {"id": "42", "auth_date": str(int(time.time()) - 7200)}
+    assert telegram.verify_login({**data, "hash": sign(data, "123:abc")}) is None

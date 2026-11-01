@@ -100,6 +100,8 @@ def describe() -> str:
              f"{TELEGRAM_BOT_USERNAME or 'not set'}  BASE_URL={BASE_URL}  db={DATABASE_PATH}"]
     if DEV_LOGIN_BLOCKED:
         lines.append("[config] DEV_LOGIN was requested but BASE_URL is public (https): the test login is OFF.")
+    if PUBLIC and not TELEGRAM_BOT_TOKEN:
+        lines.append("[config] TELEGRAM_BOT_TOKEN is empty: nobody can log in until you add it.")
     if PUBLIC and not ADMIN_IDS:
         lines.append("[config] ADMIN_IDS is empty: nobody can open /admin until you add your Telegram user id.")
     if not ENV_FILE_FOUND and not PUBLIC:

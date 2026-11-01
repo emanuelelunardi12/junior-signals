@@ -1,6 +1,6 @@
 """User-behaviour instrumentation: the fuel of the learning loop (app/learning.py).
 
-What we record, all keyed by an ANONYMOUS session id, never by Telegram user id:
+What we record, all keyed by a PSEUDONYMOUS daily id, never by the Telegram user id:
 - impression    a published signal was on screen (at least half of it, for a second); position in the list
 - open          the user expanded "Why this score"
 - dwell         seconds the expanded signal stayed open on a visible page (capped at MAX_DWELL)
@@ -10,9 +10,11 @@ What we record, all keyed by an ANONYMOUS session id, never by Telegram user id:
 - watchlist add / remove, and event-type filters used on the feed (watchlist_events)
 Telegram deliveries (deliveries table) count as Telegram impressions.
 
-Session ids: web = random token created at login and kept in the signed session cookie (the browser never
-chooses it); Telegram = keyed hash of the user id and the UTC date, so it changes daily and can't be linked
-back to a person without the server secret.
+Session ids: a keyed hash (HMAC with SESSION_SECRET) of the user id, the surface (web / telegram) and the UTC
+date. It changes every day, the browser never sees or chooses it, and it can't be linked back to a person
+without the server secret. Because it is stable within a day, logging in again or reloading does not inflate
+any count; because it is pseudonymous, not anonymous, /stop deletes it (we can recompute it) and the privacy
+page says so. Browser events are only accepted for signals the server actually showed in that session.
 
 Opt-out: users.tracking_opt_out, or the browser's Global Privacy Control header, switches recording off.
 Explicit Useful / Not useful ratings still count in per-event-type totals (they are stored in `feedback`
@@ -24,7 +26,6 @@ to the AI.
 import hashlib
 import hmac
 import re
-import secrets
 import unicodedata
 from datetime import datetime, timezone
 from typing import Literal
@@ -62,27 +63,23 @@ def parse_batch(raw) -> EventBatch | None:
 
 # ---------------- anonymous session ids ----------------
 
-def new_session_id() -> str:
-    return secrets.token_urlsafe(16)
+def _pseudonym(prefix: str, user_id: int, day: str | None = None) -> str:
+    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    digest = hmac.new(config.SESSION_SECRET.encode(), f"{prefix}:{user_id}:{day}".encode(), hashlib.sha256).hexdigest()
+    return f"{prefix}-" + digest[:24]
 
 
 def valid_session_id(sid) -> bool:
     return isinstance(sid, str) and bool(_SID.match(sid))
 
 
-def web_session_id(session: dict) -> str:
-    """The anonymous id for this browser session; created server-side if missing or malformed."""
-    sid = session.get("sid")
-    if not valid_session_id(sid):
-        sid = new_session_id()
-        session["sid"] = sid
-    return sid
+def web_session_id(user_id: int, day: str | None = None) -> str:
+    """The pseudonymous id for this user's web behaviour today. Computed on the server, never sent to the browser."""
+    return _pseudonym("web", user_id, day)
 
 
 def telegram_session_id(user_id: int, day: str | None = None) -> str:
-    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    digest = hmac.new(config.SESSION_SECRET.encode(), f"tg:{user_id}:{day}".encode(), hashlib.sha256).hexdigest()
-    return "tg-" + digest[:24]
+    return _pseudonym("tg", user_id, day)
 
 
 def tracking_allowed(user, headers=None) -> bool:
@@ -104,12 +101,14 @@ def _signal_meta(signal_ids) -> dict[int, tuple[str, str]]:
     return {r["id"]: (r["event_type"], r["ticker"]) for r in rows}
 
 
-def record_browser_events(session_id: str, batch: EventBatch) -> int:
-    """Store validated browser events for live signals. Unknown or unpublished signals are dropped."""
-    meta = _signal_meta(e.s for e in batch.events)
+def record_browser_events(session_id: str, batch: EventBatch, shown: set[int] | None = None) -> int:
+    """Store validated browser events for live signals the server showed this session (`shown`).
+    Unknown, unpublished or never-shown signals are dropped."""
+    events = [e for e in batch.events if shown is None or e.s in shown]
+    meta = _signal_meta(e.s for e in events)
     rows = []
     now = db.now()
-    for e in batch.events:
+    for e in events:
         if e.s not in meta:
             continue
         event_type, ticker = meta[e.s]
@@ -182,12 +181,13 @@ def save_comment(session_id: str, signal_id: int | None, text: str) -> bool:
     return True
 
 
-def forget_telegram_user(user_id: int, days: int | None = None) -> int:
-    """On /stop: delete Telegram-side events for this user (their daily ids can be recomputed with the secret)."""
+def forget_user(user_id: int, days: int | None = None) -> int:
+    """On /stop: delete this user's behaviour (their daily ids can be recomputed with the secret)."""
     from datetime import timedelta
     days = days or config.BEHAVIOUR_RETENTION_DAYS
     today = datetime.now(timezone.utc).date()
-    ids = [telegram_session_id(user_id, (today - timedelta(days=i)).isoformat()) for i in range(days + 1)]
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(days + 1)]
+    ids = [f(user_id, d) for d in dates for f in (web_session_id, telegram_session_id)]
     n = 0
     with db.tx() as c:
         for i in range(0, len(ids), 200):
@@ -195,6 +195,7 @@ def forget_telegram_user(user_id: int, days: int | None = None) -> int:
             q = ",".join("?" * len(chunk))
             n += c.execute(f"DELETE FROM behaviour_events WHERE session_id IN ({q})", chunk).rowcount
             n += c.execute(f"DELETE FROM watchlist_events WHERE session_id IN ({q})", chunk).rowcount
+            n += c.execute(f"DELETE FROM comments WHERE session_id IN ({q})", chunk).rowcount
     return n
 
 
@@ -228,17 +229,20 @@ def _ratio(num, den):
 
 
 def engagement_by_event_type(since: str | None = None, until: str | None = None,
-                             min_weights_version: int | None = None) -> dict[str, dict]:
+                             min_weights_version: int | None = None,
+                             max_weights_version: int | None = None) -> dict[str, dict]:
     """Open rate, like rate, click-through, skip rate and average dwell per event type.
 
     Web counts use distinct (session, signal) pairs, so reloading a page does not inflate anything.
     Likes come from the current Useful / Not useful state in `feedback`, one per user and signal.
-    min_weights_version: only signals scored with that weights version or later (before/after comparisons).
+    min/max_weights_version: only signals scored with versions in [min, max) (before/after comparisons).
     """
     c = db.get()
-    ver_sql, ver_args = ("", [])
+    ver_sql, ver_args = "", []
     if min_weights_version is not None:
-        ver_sql, ver_args = " AND s.weights_version >= ?", [min_weights_version]
+        ver_sql, ver_args = ver_sql + " AND s.weights_version >= ?", ver_args + [min_weights_version]
+    if max_weights_version is not None:
+        ver_sql, ver_args = ver_sql + " AND s.weights_version < ?", ver_args + [max_weights_version]
     wsql, wargs = _window("b.created_at", since, until)
     rows = c.execute(f"""
         SELECT b.event_type, b.action, COUNT(DISTINCT b.session_id || ':' || b.signal_id) AS pairs

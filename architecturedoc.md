@@ -7,7 +7,7 @@ This is the project's architecture document. It supersedes our earlier `scope.md
 ## Status on 1 November 2026
 
 **Runs today (locally, and in the automated test suite):**
-- The full alert path, document to published signal, with no human step (89 tests, `python -m pytest -q`; AI and Telegram are faked, so the tests prove the logic, not the AI's accuracy on real filings).
+- The full alert path, document to published signal, with no human step (96 tests, `python -m pytest -q`; AI and Telegram are faked, so the tests prove the logic, not the AI's accuracy on real filings).
 - The red-line checks, behaviour tracking, the learning loop with founder approval, the AI insight job, the expanded ticker universe and the security measures below, each with tests.
 - Checked in a real browser (headless Chrome, 1280 px and 390 px wide): dashboard, admin, tuning and privacy pages render without horizontal scrolling, and the dashboard records impressions, opens, reading time, scroll-past and source clicks.
 
@@ -18,7 +18,7 @@ This is the project's architecture document. It supersedes our earlier `scope.md
 
 **Cut or not built:** see "Designed but not built" at the end.
 
-**Demo data:** `python -m app.cli seed-demo` (or "Load demo data" on a local dashboard) inserts four fake signals on two fake tickers, `EXMP.V` and `DEMO`, with `example.com` source links. Demo signals are test data and are never presented as real.
+**Demo data:** `python -m app.cli seed-demo` (or "Load demo data" on a local dashboard) inserts four fake signals on two fake tickers, `EXMP.V` and `DEMO`, with `example.com` source links. Demo data and the two placeholder tickers (`demo: true` in `universe.yaml`) are refused or skipped on any public https deployment.
 
 ## How a document becomes a signal
 
@@ -30,7 +30,7 @@ This is the project's architecture document. It supersedes our earlier `scope.md
 | 4. Verify (Grader) | Code + AI (`MODEL_GRADE`) | The quote must appear in the document (code), and a second model must confirm the field follows from it. One retry; fields that still fail are dropped. |
 | 5. Score | Code (`scoring.py`) | Points from the rule table, using the **weights in force** (code defaults plus founder-approved changes). The breakdown, the rule behind each line and the weights version are stored with the signal. Tiers: alert (8+), feed (4 to 7), archive (below 4). Duplicates within 30 days are dropped. |
 | 6. Red lines | Code (`guardrails.py`) | Advice-like AI headlines are replaced by a rule-built neutral headline. Then, before anything is shown or sent: an http(s) source link and at least one quote found verbatim in the document. A signal that fails is **withheld automatically**, never queued for a person. |
-| 7. Publish | Code (`publish.go_live`) | Live on the dashboard at once; Telegram message to users watching the ticker above their threshold; never twice to the same user (`deliveries`). |
+| 7. Publish | Code (`publish.go_live`) | Live on the dashboard at once; Telegram message to users watching the ticker above their threshold; never twice to the same user (`deliveries`); a network error for one user is logged and does not stop the others. |
 | 8. Learn | Code + founder (`learning.py`, `/admin/tuning`) | Behaviour on published signals feeds a daily learning cycle that proposes weight changes. Only founder-approved changes affect scoring, and only for signals scored afterwards. |
 
 The pipeline runs every 30 minutes on the server (`RUN_SCHEDULER=1`, `PIPELINE_INTERVAL_HOURS=0.5`), or once with `python -m app.cli run`.
@@ -57,13 +57,13 @@ These are guarantees, not speed barriers: they run in milliseconds and need no p
 
 The dangerous step is not publishing one fast, quote-checked alert. It is the system **silently rewiring how it scores everything** from noisy engagement data: drifting overnight, rewarding clickbait (signals that get clicked but are not useful), and losing the ability to explain why a signal scored what it did. So the human reviews the **proposed self-modifications** before they take effect:
 
-- the learning loop only ever creates `tuning_proposals`; `learning.approve()` is the only code path that changes a weight, and it is only reachable from `/admin/tuning` by a founder in `ADMIN_IDS`;
+- the learning loop only ever creates `tuning_proposals`; only founder decisions write `weight_changes` (`learning.approve()`, and `learning.revert()` to undo one), reachable only from `/admin/tuning` by a founder in `ADMIN_IDS`; a double submit cannot apply a proposal twice;
 - every proposal shows the behaviour data behind it; the founder approves or rejects with an optional note; approved changes can be reverted;
 - an approved change applies to signals scored after it; published signals keep the score and breakdown they were given, so every score stays explainable.
 
 ## Behaviour tracking (the learning fuel)
 
-Recorded on published signals, keyed by an **anonymous session id**, never the Telegram user id (`app/behaviour.py`, `app/static/track.js`):
+Recorded on published signals, keyed by a **daily pseudonymous id**, never the Telegram user id (`app/behaviour.py`, `app/static/track.js`):
 
 | Signal | Stored | How it is captured |
 | --- | --- | --- |
@@ -72,14 +72,14 @@ Recorded on published signals, keyed by an **anonymous session id**, never the T
 | Dwell | seconds the opened signal stayed open on a visible page, capped at 600 | measured in the browser, paused while the tab is hidden |
 | Scroll-past | same | card was seen, not opened, and scrolled above the viewport |
 | Source click | same | click on "Read source" |
-| Like / dislike / cleared | same, surface web or Telegram | Useful / Not useful taps, recorded server-side (the events API refuses them, so they can't be faked) |
+| Like / dislike / cleared | same, surface web or Telegram | Useful / Not useful taps, recorded server-side with the rating itself (the events API refuses them); one current rating per user and signal |
 | Watchlist add / remove, event-type filter | timestamp, session id, surface, ticker or event type | `watchlist_events` |
 | Telegram impressions | per user, for corrections | `deliveries` |
 | Free-text comment (optional) | timestamp, session id, signal id, cleaned text | side input only: read by founders, never used by the learning loop, never sent to the AI |
 
-Event type and ticker are copied from the signal on the server. The web session id is a random token created at login and kept in the signed cookie; the browser never chooses it. Telegram taps use a keyed hash of the user id and the UTC date, so it changes daily and is deleted on `/stop`. Opt-out: a dashboard checkbox, `/tracking off` in Telegram, or the browser's Global Privacy Control header. Explicit ratings still count in per-event-type totals (they are needed for the buttons' state). Raw events are deleted after 180 days (`BEHAVIOUR_RETENTION_DAYS`). The plain-language note is at `/privacy`.
+Event type and ticker are copied from the signal on the server, and browser events are accepted only for signals the server showed that session. The id is a keyed hash (HMAC with the server secret) of the user id, the surface and the UTC date: computed on the server, never sent to the browser, changing daily, and deleted on `/stop` (we can recompute it). It is **pseudonymous, not anonymous**: because ratings are also stored with the account so the buttons show them, someone with database access and the secret could link a day's reading to a user; `/privacy` says so. Opt-out: a dashboard checkbox, `/tracking off` in Telegram, or the browser's Global Privacy Control header. Explicit ratings still count in per-event-type totals (they are needed for the buttons' state). Raw events are deleted after 180 days (`BEHAVIOUR_RETENTION_DAYS`). The plain-language note is at `/privacy`.
 
-Per-event-type engagement (`behaviour.engagement_by_event_type`) counts distinct (session, signal) pairs, so reloads don't inflate anything: open rate, click-through, skip rate, average reading time, like rate, Telegram deliveries.
+Per-event-type engagement (`behaviour.engagement_by_event_type`) counts distinct (daily id, signal) pairs, so reloading or logging in again the same day does not inflate the counts: open rate, click-through, skip rate, average reading time, like rate, Telegram deliveries.
 
 ## The learning loop
 
@@ -120,12 +120,12 @@ New endpoints: `POST /api/events`, `GET /api/tickers`, `POST /comments/{id}`, `G
 
 ## Security
 
-- Sessions: signed cookie, `HttpOnly`, `SameSite=Lax`, `Secure` on https; Telegram login hash verified; anonymous behaviour id rotated at every login.
+- Sessions: signed cookie, `HttpOnly`, `SameSite=Lax`, `Secure` on https; Telegram login hash verified, login links valid for one hour, and no login at all while `TELEGRAM_BOT_TOKEN` is empty (the key would otherwise be computable by anyone).
 - The development test login is **forced off** on any https `BASE_URL` (it lets anyone become any user, and an admin when `ADMIN_IDS` is empty); no implicit admins on public URLs. The app refuses to start on a public URL with a weak `SESSION_SECRET` or a bot without a webhook secret.
-- Every state-changing request is refused if the browser marks it cross-site (`Origin`, `Sec-Fetch-Site`); 6 MB body cap; Telegram webhook secret compared in constant time; malformed updates never crash it.
+- Every state-changing request is refused if the browser marks it cross-site (`Origin`, `Sec-Fetch-Site`); 6 MB body cap by declared length, and the events API also counts streamed bytes (16 KB); Telegram webhook secret compared in constant time; malformed updates never crash it.
 - Headers: Content-Security-Policy with no inline script, `nosniff`, frame `DENY`, referrer policy, permissions policy, HSTS on https. API docs routes are off.
 - Input validation: pydantic models for behaviour events (allowed actions, bounded numbers, max 50 per batch, 16 KB); ticker symbols by pattern; search text bounded and SQL `LIKE` wildcards escaped; comments cleaned of control characters, length-capped and escaped on output; bounded admin form fields; parameterised SQL throughout.
-- Rate limits (in memory, per anonymous session or address): login, behaviour events, ratings, comments, search, watchlist, settings, AI insight runs.
+- Rate limits (in memory, per logged-in account however many sessions it opens, else per address): login, behaviour events, ratings, comments, search, watchlist, settings, AI insight runs. The address fallback only covers logged-out requests and can be spoofed behind a proxy (`--forwarded-allow-ips='*'` on Render); founder approval is the backstop against inflated metrics.
 - Errors: friendly 403/404/429/500 pages (JSON for `/api`), details only in the server log.
 - Secrets: none in the repository (history scanned); `.env` and the database are git- and docker-ignored; Render secrets are `sync: false` or generated.
 - Data: one SQLite connection per thread (a stress test showed the old shared connection lost rows under concurrent writes), WAL mode, write lock.
@@ -176,7 +176,7 @@ New endpoints: `POST /api/events`, `GET /api/tickers`, `POST /comments/{id}`, `G
 | No human gate before publishing | A person catching a bad alert before users see it | Speed is the edge; red lines in code plus retraction with corrections | Withheld or retracted rate is material |
 | Human approval for every weight change | Faster adaptation | Prevents silent drift and clickbait bias; keeps scores explainable | Proposals are routinely approved unchanged for months |
 | ±1 steps, max 2 from default | Large corrections in one go | Bounded, reversible learning | Evidence is strong and a code change is logged |
-| Anonymous, per-session behaviour ids | Per-user personalisation; perfect de-duplication across sessions | Privacy by design; per-event-type totals are all the loop needs | Users ask for personalised ranking |
+| Daily pseudonymous behaviour ids | Per-user personalisation and history beyond a day | Rotates daily, never in the browser, deletable; per-event-type totals are all the loop needs | Users ask for personalised ranking |
 | Ratings kept even when a user opts out of behaviour tracking | A fully silent opt-out | Ratings are explicit and needed for the buttons' state; counted only in totals | Users object |
 | In-memory rate limiter, single worker | Limits per worker if we scale out | No Redis to run | More than one worker |
 | SQLite, single worker | Concurrent writers across machines | Simplicity during the MVP | More than a few dozen active users |
@@ -221,4 +221,4 @@ New endpoints: `POST /api/events`, `GET /api/tickers`, `POST /comments/{id}`, `G
 
 - **6 Oct 2026:** first version as `ARCHITECTURE.md`.
 - **25 Oct 2026:** renamed to `architecturedoc.md` and added to the repository; checked against the code; added the status section and the document-to-signal walkthrough; corrected the event-type count; documented the scheduler default; recorded the Signal Ledger and `/track-record` page as cut; marked `scope.md` superseded.
-- **1 Nov 2026 (session log, Living Products phase):** publishing made automatic by design (no human gate in the alert path) with the two red lines enforced in code (`guardrails.py`), automatic withholding, and retraction with corrections; human moved to the learning path. Added behaviour instrumentation (anonymous session ids, opt-out, Global Privacy Control, 180-day retention, `/privacy`); the learning loop with proposals, founder approval, revert, weights versioning and before/after metrics; the weekly suggestion-only AI insight job with verified numbers; the ticker universe for TSX, TSX Venture, NASDAQ and NYSE with honest coverage labels (SEC list automatic, TMX list manual by its terms); a security pass (headers, CSP, cross-site check, production guards, rate limits, error pages, health check); per-thread SQLite connections after a stress test exposed lost writes; UX fixes found in a real browser. Tests: 36 → 89. Not deployed yet (needs founder payment confirmation and secrets).
+- **1 Nov 2026 (session log, Living Products phase):** publishing made automatic by design (no human gate in the alert path) with the two red lines enforced in code (`guardrails.py`), automatic withholding, and retraction with corrections; human moved to the learning path. Added behaviour instrumentation (daily pseudonymous ids, opt-out, Global Privacy Control, 180-day retention, `/privacy`); the learning loop with proposals, founder approval, revert, weights versioning and before/after metrics; the weekly suggestion-only AI insight job with verified numbers; the ticker universe for TSX, TSX Venture, NASDAQ and NYSE with honest coverage labels (SEC list automatic, TMX list manual by its terms); a security pass (headers, CSP, cross-site check, production guards, rate limits, error pages, health check); per-thread SQLite connections after a stress test exposed lost writes; UX fixes found in a real browser. An independent review then found a pre-existing critical flaw (with an empty bot token, the Telegram login could be forged for any user, admins included) and several important ones (a Telegram network error could stop delivery, one account could inflate metrics, gaps in the advice filter, before/after windows); all fixed with regression tests the same day. Tests: 36 → 96. Not deployed yet (needs founder payment confirmation and secrets).

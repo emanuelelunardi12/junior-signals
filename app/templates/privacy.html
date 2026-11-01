@@ -19,9 +19,13 @@
   </table>
 
   <h2>How reading behaviour is stored</h2>
-  <p>Under an <b>anonymous session id</b>, not your Telegram id: a random token created when you log in (or, for
-    Telegram taps, a keyed code that changes every day). The browser never chooses it. Each event stores only the
-    time, the signal, its event type and ticker, and for reading time the number of seconds.</p>
+  <p>Under a <b>pseudonymous id</b>, not your Telegram id: a code computed on our server from your account, the
+    date and a secret key. It changes every day, your browser never sees or chooses it, and it cannot be connected to
+    you without that secret. It is pseudonymous, not anonymous: we can recompute it, which is how <code>/stop</code>
+    deletes your behaviour, and because your Useful / Not useful choices are also stored with your account (so the
+    buttons show them), someone with access to our database and the secret could connect a day's reading to you. We
+    don't. Each event stores only the time, the signal, its event type and ticker, and for reading time the number of
+    seconds.</p>
   <p>Raw events are deleted after {{ retention_days }} days. After that we keep only totals per event type.</p>
 
   <h2>Why</h2>

@@ -52,9 +52,10 @@ limiter = RateLimiter(LIMITS)
 
 
 def client_key(request) -> str:
-    """Who to rate-limit: the anonymous session if there is one, else the client address."""
-    sid = request.session.get("sid") if "session" in request.scope else None
-    return sid or (request.client.host if request.client else "unknown")
+    """Who to rate-limit: the logged-in account (however many sessions it opens), else the client address.
+    The address is only a fallback for logged-out requests (login); behind a proxy it can be spoofed."""
+    uid = request.session.get("uid") if "session" in request.scope else None
+    return f"user:{uid}" if uid else "addr:" + (request.client.host if request.client else "unknown")
 
 
 # ---------------- headers ----------------

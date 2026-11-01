@@ -110,8 +110,8 @@ def process_document(doc, event_type: str | None = None, draft: bool = False, sk
 
     # Weights in force = code defaults + founder-approved changes. The version is stamped on the signal so the
     # learning loop can compare behaviour before and after each approved change.
-    version = learning.weights_version()
-    result = scoring.score_signal(event_type, f, build_context(doc["ticker"], f), weights=learning.effective_weights())
+    version, weights = learning.weights_in_force()
+    result = scoring.score_signal(event_type, f, build_context(doc["ticker"], f), weights=weights)
     headline = f.get("headline") or title or scoring.EVENT_TYPES[event_type]
     phrase = guardrails.advice_phrase(headline)
     if phrase:  # red line: our words never read as advice. Replace the headline, keep the signal moving.

@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_user ON deliveries(user_id);
 -- Implicit behaviour on published signals: the fuel of the learning loop (app/behaviour.py).
--- No user id is stored, only an anonymous session id. event_type and ticker are copied from the signal on the
+-- No user id is stored, only a daily pseudonymous id (keyed hash). event_type and ticker are copied from the signal on the
 -- server, never taken from the browser.
 CREATE TABLE IF NOT EXISTS behaviour_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,7 +320,7 @@ def init(conn: sqlite3.Connection) -> None:
 def sync_universe(path=None) -> int:
     """Load config/universe.yaml into the tickers table (insert or update)."""
     data = yaml.safe_load(open(path or config.UNIVERSE_PATH)) or {}
-    rows = data.get("tickers", [])
+    rows = [t for t in data.get("tickers", []) if not (t.get("demo") and config.PUBLIC)]
     with tx() as c:
         for t in rows:
             c.execute(
@@ -368,6 +368,7 @@ def delete_user(user_id: int) -> None:
         c.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
         c.execute("DELETE FROM feedback WHERE user_id=?", (user_id,))
         c.execute("DELETE FROM deliveries WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM ticker_requests WHERE user_id=?", (user_id,))
         c.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 

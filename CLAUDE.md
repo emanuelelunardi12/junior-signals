@@ -12,10 +12,10 @@ Telegram bot and a dashboard. Users sign up with Telegram only; the Telegram use
 - `app/publish.py` `go_live()`: AUTOMATIC publishing (no human gate) after the red-line checks in `app/guardrails.py`;
   delivery modes (`watchers`, `feed_only`, `broadcast`); `deliveries` table so nothing is sent twice; `retract()` sends corrections.
 - `/admin` in `app/web.py`: live feed with retract, withheld list, founder drafts (only hand-made signals), manual signal creation, announcements.
-- `app/behaviour.py` behaviour events (anonymous session ids, opt-out, retention) + per-event-type engagement;
+- `app/behaviour.py` behaviour events (daily pseudonymous ids, opt-out, retention) + per-event-type engagement;
   `app/static/track.js` sends impressions/opens/dwell/scroll-past/source clicks to `POST /api/events`.
-- `app/learning.py` learning loop: `run_cycle()` PROPOSES ±1 weight changes from behaviour; `approve()` is the
-  ONLY code path that changes a weight (founder, `/admin/tuning`); `weight_changes` = versioned, revertible log.
+- `app/learning.py` learning loop: `run_cycle()` PROPOSES ±1 weight changes from behaviour; only founder actions
+  in `/admin/tuning` change a weight: `approve()` and `revert()`; `weight_changes` = versioned, append-only log.
 - `app/insights.py` weekly AI insight job, numbers-only input, cited numbers verified in code, suggestion-only.
 - `app/listings.py` ticker universe (SEC list for NASDAQ/NYSE; TMX lists loaded by hand) and coverage labels.
 - `app/security.py` rate limits, security headers/CSP, same-origin check. `app/guardrails.py` the red lines.

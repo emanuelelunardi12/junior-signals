@@ -162,7 +162,6 @@ def _start_session(request: Request, uid: int, first_name: str | None, username:
     db.upsert_user(uid, first_name, username)
     request.session.clear()
     request.session["uid"] = uid
-    request.session["sid"] = behaviour.new_session_id()  # fresh anonymous id at every login
     user = db.get_user(uid)
     if new or not user["can_message"]:
         # Login asked for permission to message; the only reliable check is to try.
@@ -191,7 +190,6 @@ def dev_login(request: Request, user_id: int = Form(...), first_name: str = Form
     db.upsert_user(user_id, first_name[:64], None)
     request.session.clear()
     request.session["uid"] = user_id
-    request.session["sid"] = behaviour.new_session_id()
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -199,7 +197,7 @@ def dev_login(request: Request, user_id: int = Form(...), first_name: str = Form
 def dev_demo(request: Request):
     """Development only: load demo signals and add the demo tickers to the current user's watchlist."""
     user = current_user(request)
-    if not config.DEV_LOGIN:
+    if not config.DEV_LOGIN or config.PUBLIC:
         raise HTTPException(404)
     if not user:
         return _home()
@@ -251,7 +249,7 @@ def dashboard(request: Request, t: str | None = None, type: str | None = None, q
     user = current_user(request)
     if not user:
         return _home()
-    sid = behaviour.web_session_id(request.session)
+    sid = behaviour.web_session_id(user["id"])
     track = behaviour.tracking_allowed(user, request.headers)
     wl = db.watchlist(user["id"])
     sym = clean_symbol(t)
@@ -276,6 +274,8 @@ def dashboard(request: Request, t: str | None = None, type: str | None = None, q
                 ORDER BY s.created_at DESC LIMIT 100""", wl + type_args).fetchall()
     else:
         signals = []
+    shown = [s["id"] for s in signals] + [i for i in request.session.get("shown", []) if isinstance(i, int)]
+    request.session["shown"] = list(dict.fromkeys(shown))[:200]   # events are accepted only for these
     feedback = {r["signal_id"]: r["useful"] for r in
                 c.execute("SELECT signal_id, useful FROM feedback WHERE user_id=?", (user["id"],))}
     names = {r["symbol"]: r["name"] for r in c.execute("SELECT symbol, name FROM tickers")}
@@ -283,7 +283,8 @@ def dashboard(request: Request, t: str | None = None, type: str | None = None, q
     results = [] if not query or _limited(request, "search") else \
         [r for r in listings.search(query) if r["symbol"] not in wl]
     curated = [dict(r, coverage=listings.coverage(r["symbol"])) for r in c.execute(
-        "SELECT symbol, name, exchange FROM tickers WHERE configured=1 ORDER BY symbol LIMIT 12") if r["symbol"] not in wl]
+        "SELECT symbol, name, exchange FROM tickers WHERE configured=1 AND rss!='[]' ORDER BY symbol LIMIT 12")
+        if r["symbol"] not in wl]
     return templates.TemplateResponse(request, "dashboard.html", {
         "user": user, "watchlist": wl, "active": active, "signals": signals, "feedback": feedback,
         "results": results, "q": query, "curated": curated, "names": names, "etype": etype,
@@ -314,7 +315,7 @@ def watchlist_add(request: Request, symbol: str = Form(...)):
     if not added:
         return _dash(f"{sym} is not on TSX, TSX Venture, NASDAQ or NYSE in our list. Request noted.")
     if behaviour.tracking_allowed(user, request.headers):
-        behaviour.record_watchlist(behaviour.web_session_id(request.session), "web", "add", ticker=sym)
+        behaviour.record_watchlist(behaviour.web_session_id(user["id"]), "web", "add", ticker=sym)
     cov = listings.coverage(sym)
     if cov == "not covered yet":
         return _dash(f"Added {sym}. We don't collect its news automatically yet, so only signals we add by hand "
@@ -333,7 +334,7 @@ def watchlist_remove(request: Request, symbol: str = Form(...)):
     if sym and sym in db.watchlist(user["id"]):
         db.remove_from_watchlist(user["id"], sym)
         if behaviour.tracking_allowed(user, request.headers):
-            behaviour.record_watchlist(behaviour.web_session_id(request.session), "web", "remove", ticker=sym)
+            behaviour.record_watchlist(behaviour.web_session_id(user["id"]), "web", "remove", ticker=sym)
     return _dash()
 
 
@@ -369,7 +370,7 @@ def web_feedback(request: Request, signal_id: int, useful: int):
     state = behaviour.set_rating(user["id"], signal_id, useful)
     if behaviour.tracking_allowed(user, request.headers):
         action = "like_cleared" if state is None else ("like" if state == 1 else "dislike")
-        behaviour.record_rating(behaviour.web_session_id(request.session), "web", signal_id, action)
+        behaviour.record_rating(behaviour.web_session_id(user["id"]), "web", signal_id, action)
     if _wants_json(request):
         return {"state": state}
     return RedirectResponse(_safe_back(request), status_code=303)
@@ -382,7 +383,9 @@ def _safe_back(request: Request) -> str:
     if ref.netloc and ref.netloc != request.url.netloc:
         return "/dashboard"
     path = ref.path or "/dashboard"
-    return path + (f"?{ref.query}" if ref.query else "") if path.startswith("/") else "/dashboard"
+    if not path.startswith("/") or path.startswith("//"):
+        return "/dashboard"
+    return path + (f"?{ref.query}" if ref.query else "")
 
 
 @app.post("/api/events")
@@ -397,14 +400,20 @@ async def api_events(request: Request):
         return _too_many()
     if not behaviour.tracking_allowed(user, request.headers):
         return {"stored": 0, "tracking": "off"}
+    body = b""
+    async for chunk in request.stream():   # count bytes as they arrive: a chunked body has no Content-Length
+        body += chunk
+        if len(body) > 16_384:
+            return JSONResponse({"error": "too large"}, status_code=413)
     try:
-        raw = json.loads((await request.body())[:16_384] or b"{}")
+        raw = json.loads(body or b"{}")
     except ValueError:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
     batch = behaviour.parse_batch(raw)
     if batch is None:
         return JSONResponse({"error": "invalid events"}, status_code=422)
-    return {"stored": behaviour.record_browser_events(behaviour.web_session_id(request.session), batch)}
+    shown = {i for i in request.session.get("shown", []) if isinstance(i, int)}
+    return {"stored": behaviour.record_browser_events(behaviour.web_session_id(user["id"]), batch, shown)}
 
 
 @app.get("/api/tickers")
@@ -427,7 +436,7 @@ def comment(request: Request, signal_id: int, text: str = Form("")):
         return _dash("You've sent several comments already. Try again in a few minutes.")
     if len(text) > 4 * behaviour.MAX_COMMENT:
         return _dash("That comment is too long (500 characters at most).")
-    ok = behaviour.save_comment(behaviour.web_session_id(request.session), signal_id, text)
+    ok = behaviour.save_comment(behaviour.web_session_id(user["id"]), signal_id, text)
     return _dash("Thanks, a founder will read it." if ok else "Write a short comment first.")
 
 
@@ -502,6 +511,9 @@ def admin_edit(request: Request, signal_id: int, headline: str = Form(...),
         return _back("The headline can't be empty.")
     if adjustment and not reason.strip():
         return _back("Add a reason for the score adjustment. Users see it in the breakdown.")
+    from app import guardrails
+    if guardrails.advice_phrase(reason):
+        return _back("That reason reads as investment advice; users see it, so rephrase it as a fact.")
     adjustment = max(-10, min(int(adjustment), 10))
     old_parts, old_rules = json.loads(s["breakdown"]), json.loads(s["rule_keys"] or "[]")
     keep = [i for i, p in enumerate(old_parts) if not p[0].startswith(REVIEWER_LABEL)]
@@ -521,9 +533,12 @@ def admin_edit(request: Request, signal_id: int, headline: str = Form(...),
 def admin_retract(request: Request, signal_id: int, reason: str = Form("")):
     """After-the-fact correction of a live signal. Not part of the alert path: the alert already went out."""
     _admin_or_403(request)
+    from app import guardrails
     reason = reason.strip()[:300]
     if not reason:
         return _back("Give a reason. Everyone who received the signal gets it as a correction.")
+    if guardrails.advice_phrase(reason):
+        return _back("That reason reads as investment advice; users see it, so rephrase it as a fact.")
     if db.get().execute("SELECT 1 FROM signals WHERE id=? AND status='published'", (signal_id,)).fetchone() is None:
         return _back("That signal is not live.")
     sent = publish.retract(signal_id, reason)
@@ -649,7 +664,12 @@ def admin_tuning(request: Request):
     by_line = sorted(([k] + v for k, v in lines.items()), key=lambda x: -x[1])
     unrated = c.execute("""SELECT COUNT(*) n FROM signals s WHERE s.status='published'
                            AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.signal_id=s.id)""").fetchone()["n"]
-    return templates.TemplateResponse(request, "tuning.html", {
+    filters = c.execute("""SELECT event_type, COUNT(*) n FROM watchlist_events WHERE action='filter' AND created_at >= ?
+                           GROUP BY event_type ORDER BY n DESC""", (since,)).fetchall()
+    watch = c.execute("""SELECT ticker, SUM(action='add') adds, SUM(action='remove') removes FROM watchlist_events
+                         WHERE action IN ('add','remove') AND created_at >= ? GROUP BY ticker
+                         ORDER BY adds + removes DESC LIMIT 10""", (since,)).fetchall()
+    return templates.TemplateResponse(request, "tuning.html", {"filters": filters, "watch": watch,
         "user": user, "admin": True, "proposals": proposals, "decided": decided, "results": results,
         "cycles": cycles, "by_type": by_type, "by_rule": by_rule, "by_line": by_line, "unrated": unrated,
         "weights": learning.weight_table(), "version": learning.weights_version(), "labels": scoring.RULE_LABELS,
@@ -767,9 +787,12 @@ async def admin_listings(request: Request):
 @app.post("/admin/announce")
 def admin_announce(request: Request, text: str = Form(...)):
     user = _admin_or_403(request)
+    from app import guardrails
     text = text.strip()[:1000]
     if not text:
         return _back("Write the announcement first.")
+    if guardrails.advice_phrase(text):
+        return _back("That announcement reads as investment advice. Information only: rephrase it.")
     sent = publish.send_announcement(text, user["id"])
     return _back(f"Announcement sent to {sent} user{'s' if sent != 1 else ''}.")
 

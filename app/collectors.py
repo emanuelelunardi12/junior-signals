@@ -72,6 +72,9 @@ def collect_rss(ticker_row) -> int:
 
 def collect_edgar(ticker_row, max_filings: int = 20) -> int:
     cik = ticker_row["cik"]
+    if not cik:  # same fallback as listings.coverage(), so a ticker labelled "EDGAR" really is collected
+        row = db.get().execute("SELECT cik FROM listings WHERE symbol=?", (ticker_row["symbol"],)).fetchone()
+        cik = row["cik"] if row else None
     if not cik:
         return 0
     cik10 = str(cik).zfill(10)

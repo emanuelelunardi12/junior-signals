@@ -1,5 +1,8 @@
-# The tickers we track. Users can only add tickers listed here (others are logged as requests).
-# Fill in from your interviewees' watchlists.
+# Our hand-curated tickers, with the newswire feeds that give them event coverage. Users can also add any
+# TSX, TSX Venture, NASDAQ or NYSE listing from the listings table (app/listings.py); names without a feed or a
+# SEC CIK show "not covered yet". Fill in real names and feeds from your interviewees' watchlists.
+#
+# demo: true   placeholder used for local demo data only; skipped on a public (https) deployment.
 #
 # rss:     company or search RSS feeds from newswires (Newsfile, GlobeNewswire, Accesswire...).
 #          Find the feed on the newswire's company page; check each site's terms of use.
@@ -13,6 +16,7 @@
 
 tickers:
   - symbol: EXMP.V
+    demo: true
     name: Example Copper Corp
     exchange: TSXV
     commodity: copper
@@ -21,6 +25,7 @@ tickers:
     rss: []
     match: ["Example Copper"]
   - symbol: DEMO
+    demo: true
     name: Demo Energy Inc
     exchange: NYSE American
     commodity: oil_gas

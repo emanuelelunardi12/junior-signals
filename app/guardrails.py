@@ -30,6 +30,13 @@ ADVICE_PATTERNS = [
     r"\b(guaranteed|can'?t\s+lose|cannot\s+lose|to\s+the\s+moon|moonshot|\d+x\s+potential)\b",
     r"\b(undervalued|overvalued|upside\s+potential|cheap\s+stock|bargain)\b",
     r"\b(stock|shares|price)\s+will\s+(soar|skyrocket|explode|double|surge|rise|rally|go\s+up|fall|drop)\b",
+    r"^\W*(buy|sell|short|accumulate|avoid|dump)\b",                 # imperative at the start
+    r"\bstrong\s+(buy|sell)\b",
+    r"\b(outperform|underperform|overweight|underweight|market\s+perform)\b(\s+(rating|recommendation))?",
+    r"\b(rate[sd]?|rating)\s+(it\s+|the\s+stock\s+|\w+\s+)?(an?\s+)?(buy|sell|hold)\b",
+    r"\b(up|down)grade[sd]?\s+to\s+(buy|sell|hold|outperform|underperform|overweight|underweight)\b",
+    r"\bbuying\s+opportunity\b",
+    r"\b(buy|sell|accumulate)\s+\S+\s+(before|ahead\s+of|now)\b",
 ]
 _ADVICE = re.compile("|".join(ADVICE_PATTERNS), re.IGNORECASE)
 

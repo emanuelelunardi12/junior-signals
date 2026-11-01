@@ -4,7 +4,7 @@
                  source clicks, dwell, Useful / Not useful) from app/behaviour.py, plus the rules themselves.
     LEARNING     run_cycle() aggregates it deterministically and turns consistent patterns into PROPOSED
                  weight changes (+1 or -1), each with the numbers behind it.
-    HUMAN CHECK  approve() is the ONLY code path that changes a weight. Nothing here auto-applies.
+    HUMAN CHECK  only founder decisions change a weight: approve() (and revert() to undo one). Nothing auto-applies.
     IMPROVEMENT  once approved, every signal scored afterwards uses the new weight (and is stamped with the
                  weights version), so the next alerts of that type are scored and tiered better.
     MEASUREMENT  each cycle records engagement per event type and headline metrics; each approved change
@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from app import behaviour, db, scoring
 
 WINDOW_DAYS = 30
-MIN_IMPRESSIONS = 30      # web impressions + Telegram deliveries before an event type can be judged
+MIN_IMPRESSIONS = 30      # web impressions before engagement (open rate, CTR, skip rate) can be judged
 MIN_RATINGS = 5           # Useful / Not useful ratings before like rate counts
 MIN_RULE_RATINGS = 8      # stricter for rules: they overlap with event types
 LIKE_HIGH, LIKE_LOW = 0.70, 0.35
@@ -44,20 +44,24 @@ def _ago(days: int) -> str:
 
 # ---------------- weights in force ----------------
 
+def weights_in_force() -> tuple[int, dict]:
+    """(version, weights) read together in one query, so a signal is never stamped with one version and
+    scored with another. Weights = code defaults with every founder decision applied, latest per weight."""
+    w = scoring.default_weights()
+    version = 0
+    for r in db.get().execute("SELECT id, weight_key, new_value FROM weight_changes ORDER BY id"):
+        version = r["id"]
+        if r["weight_key"] in scoring.RULE_LABELS:
+            scoring.set_weight(w, r["weight_key"], r["new_value"])
+    return version, w
+
+
 def weights_version() -> int:
-    row = db.get().execute("SELECT MAX(id) v FROM weight_changes").fetchone()
-    return row["v"] or 0
+    return weights_in_force()[0]
 
 
 def effective_weights() -> dict:
-    """Code defaults with every founder-approved change applied (latest change per weight wins)."""
-    w = scoring.default_weights()
-    rows = db.get().execute("""SELECT weight_key, new_value FROM weight_changes
-                               WHERE id IN (SELECT MAX(id) FROM weight_changes GROUP BY weight_key)""")
-    for r in rows:
-        if r["weight_key"] in scoring.RULE_LABELS:
-            scoring.set_weight(w, r["weight_key"], r["new_value"])
-    return w
+    return weights_in_force()[1]
 
 
 def weight_table() -> list[dict]:
@@ -71,14 +75,23 @@ def weight_table() -> list[dict]:
 
 # ---------------- aggregation ----------------
 
-def engagement_by_rule(since: str | None = None, min_weights_version: int | None = None) -> dict[str, dict]:
+def _versions(min_v, max_v) -> tuple[str, list]:
+    sql, args = "", []
+    if min_v is not None:
+        sql, args = sql + " AND s.weights_version >= ?", args + [min_v]
+    if max_v is not None:
+        sql, args = sql + " AND s.weights_version < ?", args + [max_v]
+    return sql, args
+
+
+def engagement_by_rule(since: str | None = None, min_weights_version: int | None = None,
+                       until: str | None = None, max_weights_version: int | None = None) -> dict[str, dict]:
     """Like rate, open rate and CTR of signals whose score included each rule."""
     c = db.get()
-    ver = " AND s.weights_version >= ?" if min_weights_version is not None else ""
-    vargs = [min_weights_version] if min_weights_version is not None else []
-    since_b = " AND b.created_at >= ?" if since else ""
-    since_f = " AND f.created_at >= ?" if since else ""
-    sargs = [since] if since else []
+    ver, vargs = _versions(min_weights_version, max_weights_version)
+    since_b = (" AND b.created_at >= ?" if since else "") + (" AND b.created_at < ?" if until else "")
+    since_f = (" AND f.created_at >= ?" if since else "") + (" AND f.created_at < ?" if until else "")
+    sargs = ([since] if since else []) + ([until] if until else [])
     out: dict[str, dict] = {}
 
     def slot(k):
@@ -113,13 +126,14 @@ def _averages(metrics: dict[str, dict]) -> dict:
             "skip_rate": behaviour._ratio(tot["scroll_pasts"], tot["impressions"])}
 
 
-def headline_metrics(since: str | None = None, min_weights_version: int | None = None) -> dict:
+def headline_metrics(since: str | None = None, min_weights_version: int | None = None,
+                     until: str | None = None, max_weights_version: int | None = None) -> dict:
     """The learning metrics we track over time: how the alert tier performs, and CTR on the top of the feed."""
     c = db.get()
-    since_b = " AND b.created_at >= ?" if since else ""
-    since_f = " AND f.created_at >= ?" if since else ""
-    ver = " AND s.weights_version >= ?" if min_weights_version is not None else ""
-    args = ([since] if since else []) + ([min_weights_version] if min_weights_version is not None else [])
+    since_b = (" AND b.created_at >= ?" if since else "") + (" AND b.created_at < ?" if until else "")
+    since_f = (" AND f.created_at >= ?" if since else "") + (" AND f.created_at < ?" if until else "")
+    ver, vargs = _versions(min_weights_version, max_weights_version)
+    args = ([since] if since else []) + ([until] if until else []) + vargs
 
     def pairs(action, extra=""):
         return c.execute(f"""SELECT COUNT(DISTINCT b.session_id || ':' || b.signal_id) n FROM behaviour_events b
@@ -245,11 +259,13 @@ class NotAllowed(Exception):
     pass
 
 
-def target_metrics(key: str, since: str | None = None, min_weights_version: int | None = None) -> dict | None:
+def target_metrics(key: str, since: str | None = None, min_weights_version: int | None = None,
+                   until: str | None = None, max_weights_version: int | None = None) -> dict | None:
     """Engagement for whatever a weight affects: its event type, or the signals carrying its rule."""
+    kw = dict(since=since, until=until, min_weights_version=min_weights_version, max_weights_version=max_weights_version)
     if key.startswith("base."):
-        return behaviour.engagement_by_event_type(since=since, min_weights_version=min_weights_version).get(key[5:])
-    return engagement_by_rule(since=since, min_weights_version=min_weights_version).get(key)
+        return behaviour.engagement_by_event_type(**kw).get(key[5:])
+    return engagement_by_rule(**kw).get(key)
 
 
 def approve(proposal_id: int, admin_id: int, note: str = "") -> int:
@@ -272,12 +288,16 @@ def approve(proposal_id: int, admin_id: int, note: str = "") -> int:
     before = {"target": target_metrics(p["weight_key"], since=_ago(WINDOW_DAYS)),
               "headline": headline_metrics(since=_ago(WINDOW_DAYS)), "taken_at": db.now()}
     with db.tx() as c:
+        # claim the proposal first: a double submit finds it no longer 'proposed' and changes nothing
+        claimed = c.execute("""UPDATE tuning_proposals SET status='approved', decided_by=?, decided_at=?,
+                               decision_note=?, before_metric=? WHERE id=? AND status='proposed'""",
+                            (admin_id, db.now(), note[:500], json.dumps(before), proposal_id)).rowcount
+        if not claimed:
+            raise NotAllowed("That proposal is not open.")
         version = c.execute("""INSERT INTO weight_changes (weight_key, old_value, new_value, proposal_id, kind,
                                changed_by, changed_at) VALUES (?,?,?,?,'approve',?,?)""",
                             (p["weight_key"], current, p["proposed_value"], proposal_id, admin_id, db.now())).lastrowid
-        c.execute("""UPDATE tuning_proposals SET status='approved', decided_by=?, decided_at=?, decision_note=?,
-                     before_metric=?, applied_version=? WHERE id=?""",
-                  (admin_id, db.now(), note[:500], json.dumps(before), version, proposal_id))
+        c.execute("UPDATE tuning_proposals SET applied_version=? WHERE id=?", (version, proposal_id))
     return version
 
 
@@ -298,17 +318,30 @@ def revert(proposal_id: int, admin_id: int) -> int:
     if current != p["proposed_value"]:
         raise NotAllowed("This weight has changed again since; revert the later change first.")
     with db.tx() as c:
+        if not c.execute("UPDATE tuning_proposals SET status='reverted' WHERE id=? AND status='approved'",
+                         (proposal_id,)).rowcount:
+            raise NotAllowed("Only an approved change can be reverted.")
         version = c.execute("""INSERT INTO weight_changes (weight_key, old_value, new_value, proposal_id, kind,
                                changed_by, changed_at) VALUES (?,?,?,?,'revert',?,?)""",
                             (p["weight_key"], current, p["current_value"], proposal_id, admin_id, db.now())).lastrowid
-        c.execute("UPDATE tuning_proposals SET status='reverted' WHERE id=?", (proposal_id,))
     return version
 
 
 def before_after(proposal) -> dict:
-    """The measurable result of an approved change: target engagement before vs on signals scored after it."""
+    """The measurable result of an approved change.
+
+    Before: the WINDOW_DAYS before approval (snapshot taken at approval).
+    After: signals scored with this change in force (from its version up to the next change to the SAME weight,
+    e.g. a revert), during the same number of days after approval. Other weights approved in between can still
+    affect the comparison; the page says so.
+    """
     before = json.loads(proposal["before_metric"] or "{}")
-    after_target = target_metrics(proposal["weight_key"], min_weights_version=proposal["applied_version"])
-    after_head = headline_metrics(min_weights_version=proposal["applied_version"])
-    return {"before": before.get("target") or {}, "after": after_target or {},
-            "before_head": before.get("headline") or {}, "after_head": after_head}
+    v = proposal["applied_version"]
+    nxt = db.get().execute("SELECT MIN(id) n FROM weight_changes WHERE weight_key=? AND id>?",
+                           (proposal["weight_key"], v)).fetchone()["n"]
+    start = proposal["decided_at"]
+    end = (datetime.fromisoformat(start) + timedelta(days=WINDOW_DAYS)).isoformat(timespec="seconds") if start else None
+    kw = dict(min_weights_version=v, max_weights_version=nxt, since=start, until=end)
+    return {"before": before.get("target") or {}, "after": target_metrics(proposal["weight_key"], **kw) or {},
+            "before_head": before.get("headline") or {}, "after_head": headline_metrics(**kw),
+            "after_ended_by": nxt}

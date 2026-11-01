@@ -57,8 +57,9 @@
 
 <section class="panel">
   <h2>Did it work? <span class="count">before vs after each approved change</span></h2>
-  <p class="small">“Before”: the {{ window }} days before approval. “After”: behaviour on signals scored with the new
-    weights. Small samples mean little; under about 20 ratings, read the counts, not the percentages.</p>
+  <p class="small">“Before”: the {{ window }} days before approval. “After”: the {{ window }} days after it, on signals
+    scored while this change was in force (until the next change to the same weight, such as a revert). Other weights
+    approved in between can also move these numbers. Under about 20 ratings, read the counts, not the percentages.</p>
   {% if results %}
   <div class="tablewrap"><table class="stats">
     <thead><tr><th scope="col">Change</th><th scope="col">Like rate</th><th scope="col">Open rate</th><th scope="col">Click-through</th><th scope="col">Alert-tier like rate</th></tr></thead>
@@ -107,6 +108,22 @@
       <td>{{ m.likes }} of {{ m.ratings }}{% if m.ratings %} ({{ m.like_rate | pct }}){% endif %}</td></tr>
     {% else %}<tr><td colspan="7">No behaviour recorded yet.</td></tr>{% endfor %}
     </tbody>
+  </table></div>
+</section>
+
+<section class="panel">
+  <h2>Watchlist and filter activity <span class="count">last {{ window }} days, context only</span></h2>
+  <p class="small">Which event types people narrow the feed to, and which names they add or drop. Not used by the
+    proposal rules; read it alongside them (a type nobody filters for and many skip is a hint, not proof).</p>
+  <div class="tablewrap"><table class="stats">
+    <thead><tr><th scope="col">Feed filtered to</th><th scope="col">Times</th></tr></thead>
+    {% for f in filters %}<tr><th scope="row">{{ event_types.get(f.event_type, f.event_type) }}</th><td>{{ f.n }}</td></tr>
+    {% else %}<tr><td colspan="2">No filters used yet.</td></tr>{% endfor %}
+  </table></div>
+  <div class="tablewrap"><table class="stats">
+    <thead><tr><th scope="col">Ticker</th><th scope="col">Added</th><th scope="col">Removed</th></tr></thead>
+    {% for w in watch %}<tr><th scope="row">{{ w.ticker }}</th><td>{{ w.adds }}</td><td>{{ w.removes }}</td></tr>
+    {% else %}<tr><td colspan="3">No watchlist changes yet.</td></tr>{% endfor %}
   </table></div>
 </section>
 

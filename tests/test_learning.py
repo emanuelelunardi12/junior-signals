@@ -136,6 +136,27 @@ def test_reject_revert_and_stale_proposals():
     assert db.get().execute("SELECT status FROM tuning_proposals WHERE id=?", (stale,)).fetchone()["status"] == "superseded"
 
 
+def test_double_approval_creates_one_change():
+    pid = learning.create_proposal("premium_to_market", +1, "x", {})
+    learning.approve(pid, 1)
+    with pytest.raises(learning.NotAllowed):
+        learning.approve(pid, 1)
+    assert db.get().execute("SELECT COUNT(*) n FROM weight_changes").fetchone()["n"] == 1
+
+
+def test_after_metric_stops_at_the_next_change_to_the_same_weight():
+    pid = learning.create_proposal("base.private_placement", -1, "x", {})
+    v = learning.approve(pid, 1)
+    behave(published("private_placement", version=v), sessions=10, opened=5, clicked=1, skipped=2,
+           likes=4, dislikes=1, first_user=7000)
+    rv = learning.revert(pid, 1)
+    behave(published("private_placement", version=rv), sessions=10, opened=0, clicked=0, skipped=9,
+           likes=0, dislikes=5, first_user=8000)          # scored after the revert: must not count as "after"
+    p = db.get().execute("SELECT * FROM tuning_proposals WHERE id=?", (pid,)).fetchone()
+    r = learning.before_after(p)
+    assert r["after"]["impressions"] == 10 and r["after"]["like_rate"] == 0.8 and r["after_ended_by"] == rv
+
+
 def test_bounds_drift_and_one_open_proposal_per_weight():
     assert learning.create_proposal("base.strategic_investment", +1, "a", {}) is not None
     assert learning.create_proposal("base.strategic_investment", +1, "b", {}) is None      # already open

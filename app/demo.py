@@ -42,7 +42,11 @@ DEMO_TICKERS = ["EXMP.V", "DEMO"]
 
 def seed(user_id: int | None = None) -> int:
     """Adds the demo signals once (safe to repeat) and, if given, puts the demo tickers on that user's watchlist.
-    Returns the number of signals added this time."""
+    Returns the number of signals added this time. Refuses on a public deployment: demo signals bypass the
+    pipeline and must never reach real users."""
+    from app import config
+    if config.PUBLIC:
+        raise RuntimeError("Demo data is for local development only (BASE_URL is public).")
     db.sync_universe()
     added = 0
     with db.tx() as c:

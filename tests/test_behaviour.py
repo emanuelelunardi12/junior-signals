@@ -37,7 +37,7 @@ def test_browser_events_are_stored_with_server_side_metadata(monkeypatch):
     assert {g["event_type"] for g in got} == {"strategic_investment"} and {g["ticker"] for g in got} == {"EXMP.V"}
     assert got[2]["value"] == behaviour.MAX_DWELL and got[0]["position"] == 0
     sid = got[0]["session_id"]
-    assert behaviour.valid_session_id(sid) and "55" not in sid      # anonymous: not the Telegram id
+    assert behaviour.valid_session_id(sid) and "55" not in sid      # pseudonymous: not the Telegram id
     assert {g["surface"] for g in got} == {"web"}
 
 
@@ -56,14 +56,35 @@ def test_events_need_a_login():
     assert TestClient(app).post("/api/events", json={"events": [{"a": "open", "s": 1}]}).status_code == 401
 
 
-def test_session_id_comes_from_the_server_and_rotates_at_login(monkeypatch):
+def test_session_id_is_server_side_daily_and_logins_do_not_inflate_counts(monkeypatch):
     c, sig = setup(monkeypatch)
     c.post("/api/events", json={"events": [{"a": "open", "s": sig["id"]}], "sid": "attacker-chosen-id-123456"})
     first = rows()[-1]["session_id"]
-    assert first != "attacker-chosen-id-123456"
-    c.post("/dev-login", data={"user_id": 55, "first_name": "T"})
-    c.post("/api/events", json={"events": [{"a": "open", "s": sig["id"]}]})
-    assert rows()[-1]["session_id"] != first
+    assert first == behaviour.web_session_id(55) and "55" not in first     # pseudonym, not the id
+    assert first != behaviour.web_session_id(55, "2000-01-01")             # rotates daily
+    c.post("/dev-login", data={"user_id": 55, "first_name": "T"})           # log in again: same pseudonym today
+    c.get("/dashboard")
+    c.post("/api/events", json={"events": [{"a": "impression", "s": sig["id"]}]})
+    c.post("/api/events", json={"events": [{"a": "impression", "s": sig["id"]}]})
+    assert rows()[-1]["session_id"] == first
+    assert behaviour.engagement_by_event_type()["strategic_investment"]["impressions"] == 1
+
+
+def test_events_only_for_signals_the_server_showed(monkeypatch):
+    from app.web import app
+    c, sig = setup(monkeypatch)
+    other = TestClient(app)
+    other.post("/dev-login", data={"user_id": 56, "first_name": "U"})       # never opened a page with the signal
+    assert other.post("/api/events", json={"events": [{"a": "impression", "s": sig["id"]}]}).json() == {"stored": 0}
+
+
+def test_chunked_body_is_capped(monkeypatch):
+    c, sig = setup(monkeypatch)
+
+    def chunks():
+        for _ in range(20):
+            yield b" " * 1024
+    assert c.post("/api/events", content=chunks(), headers={"content-type": "application/json"}).status_code == 413
 
 
 def test_opt_out_and_global_privacy_control_stop_recording(monkeypatch):
@@ -110,8 +131,16 @@ def test_telegram_taps_use_a_daily_pseudonym(monkeypatch, fresh_db):
     ev = rows()[-1]
     assert ev["surface"] == "telegram" and ev["action"] == "like"
     assert ev["session_id"] == behaviour.telegram_session_id(70) != behaviour.telegram_session_id(70, "2000-01-01")
+    with db.tx() as cx:
+        cx.execute("INSERT INTO behaviour_events (created_at, session_id, surface, action, signal_id, event_type, ticker)"
+                   " VALUES (?,?,'web','open',?,'strategic_investment','EXMP.V')",
+                   (db.now(), behaviour.web_session_id(70), sig["id"]))
+    db.add_to_watchlist(70, "NOPE")                                            # leaves a ticker request
     bot.handle_command({"id": 70}, 70, "/stop")
-    assert db.get().execute("SELECT COUNT(*) n FROM behaviour_events WHERE surface='telegram'").fetchone()["n"] == 0
+    assert db.get().execute("SELECT COUNT(*) n FROM behaviour_events WHERE session_id LIKE 'tg-%'").fetchone()["n"] == 0
+    left = {r["session_id"] for r in db.get().execute("SELECT session_id FROM behaviour_events")}
+    assert behaviour.web_session_id(70) not in left
+    assert db.get().execute("SELECT COUNT(*) n FROM ticker_requests WHERE user_id=70").fetchone()["n"] == 0
 
 
 def test_engagement_by_event_type(monkeypatch):
@@ -143,4 +172,4 @@ def test_comment_is_side_input_and_sanitised(monkeypatch):
 def test_privacy_page_is_public():
     from app.web import app
     body = TestClient(app).get("/privacy").text
-    assert "anonymous session id" in body and "/tracking off" in body
+    assert "pseudonymous id" in body and "/tracking off" in body

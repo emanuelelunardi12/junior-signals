@@ -80,8 +80,13 @@ def test_advice_detector_leaves_transaction_language_alone():
     for ok in ["Big Copper buys a 9.9% stake in Example Copper", "C$12.5 million bought deal financing",
                "Insider sells 2% of holdings", "Appointment of VP Corporate Development"]:
         assert guardrails.advice_phrase(ok) is None, ok
+    for ok in ["Fund agreed to sell shares to Big Copper", "Big Copper to buy 9.9% of Example Copper",
+               "Buyer of the royalty is Sandstorm", "Holder crosses 10% threshold after buying shares"]:
+        assert guardrails.advice_phrase(ok) is None, ok
     for bad in ["Time to buy EXMP", "We recommend investors add", "price target of $2", "you should sell",
-                "Strong buy rating", "shares will soar after this"]:
+                "Strong buy rating", "shares will soar after this", "Analysts rate EXMP a Strong Buy", "Buy EXMP",
+                "Accumulate EXMP before the drill results", "This is a buying opportunity", "Upgrade to buy",
+                "Outperform rating reiterated"]:
         assert guardrails.advice_phrase(bad), bad
 
 
@@ -131,3 +136,33 @@ def test_pipeline_never_creates_drafts():
     src = inspect.getsource(pipeline.process_document)
     assert 'status = "draft" if draft else' in src
     assert "pending_review" not in inspect.getsource(pipeline) + inspect.getsource(publish)
+
+
+def test_a_telegram_network_error_does_not_stop_delivery(monkeypatch, fresh_db):
+    """One unreachable user (or a Telegram outage) must not abort the run or skip the remaining recipients."""
+    import httpx
+    from app import config, telegram
+    fake_calls(monkeypatch)
+    watcher(7)
+    watcher(8)
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "1:abc")
+    sent = []
+
+    def flaky_post(url, json=None, timeout=None):
+        if json["chat_id"] == 7:
+            raise httpx.ConnectError("network down")
+        sent.append(json["chat_id"])
+        return httpx.Response(200, json={"ok": True, "result": {}}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx, "post", flaky_post)
+    monkeypatch.setattr(telegram, "send_message", _real_send(telegram))   # undo the test fake: use the HTTP path
+    s = run_doc()
+    assert s["status"] == "published" and sent == [8]
+    assert db.get().execute("SELECT status FROM documents").fetchone()["status"] == "extracted"
+
+
+def _real_send(telegram):
+    """Same as telegram.send_message, which the test fixture replaces with a fake."""
+    def send(chat_id, text, buttons=None):
+        params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        return telegram.call("sendMessage", **params)
+    return send

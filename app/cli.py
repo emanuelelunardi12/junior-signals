@@ -85,7 +85,10 @@ def cmd_load_listings(a):
 def cmd_seed_demo(_):
     """Fake signals so the dashboard can be viewed without API keys. Never run against real data."""
     from app import demo
-    n = demo.seed()
+    try:
+        n = demo.seed()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
     if n:
         print(f"Added {n} demo signals. In the app, add EXMP.V and DEMO to your watchlist, or use the "
               "'Load demo data' button on the dashboard.")

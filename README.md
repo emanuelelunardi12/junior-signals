@@ -17,7 +17,7 @@ python -m app.cli init
 uvicorn app.web:app --reload
 ```
 Open http://localhost:8000, click "Log in as test user", then "Load demo data" on the dashboard. That adds
-example signals and puts EXMP.V and DEMO on your watchlist. `/admin` (the Review link) shows the review queue.
+example signals and puts EXMP.V and DEMO on your watchlist. `/admin` (the Admin link) shows what went live.
 
 Run other commands (`python -m app.cli ...`) in a **second terminal**: the one running the server is busy
 and ignores what you type.
@@ -76,7 +76,7 @@ forbid automated copying, so download the issuer list yourself, save the sheet a
 ## Behaviour tracking and privacy
 
 The dashboard records impressions, opens, reading time, scroll-past, source clicks, ratings and watchlist changes under
-an anonymous session id (`app/behaviour.py`). Users can opt out on the dashboard, with `/tracking off` in Telegram, or
+a daily pseudonymous id, never the Telegram id (`app/behaviour.py`). Users can opt out on the dashboard, with `/tracking off` in Telegram, or
 via Global Privacy Control. The user-facing note is at `/privacy`. Run a learning cycle by hand with
 `python -m app.cli learn`; it only proposes.
 
@@ -100,7 +100,9 @@ Two options, don't use both:
 - **Host cron** (simplest, works with several web workers): `python -m app.cli run` every few hours and
   `python -m app.cli digest` weekly.
 - **In-process scheduler:** set `RUN_SCHEDULER=1` with a single worker. It runs the pipeline every
-  `PIPELINE_INTERVAL_HOURS` and the digest on `DIGEST_DAY`/`DIGEST_HOUR`, and messages `ADMIN_IDS` if a run fails.
+  `PIPELINE_INTERVAL_HOURS` (30 minutes on Render), a learning cycle every `LEARNING_INTERVAL_HOURS` (proposes only),
+  the AI insight job every `INSIGHTS_INTERVAL_HOURS` (suggests only), a weekly SEC listings refresh, and the digest on
+  `DIGEST_DAY`/`DIGEST_HOUR`. It messages `ADMIN_IDS` if a run fails or a cycle creates proposals.
 
 ## Handout 5 test (Step-by-step vs Maker and Grader)
 

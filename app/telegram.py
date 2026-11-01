@@ -20,8 +20,13 @@ class TelegramError(Exception):
 def call(method: str, **params) -> dict:
     if not config.TELEGRAM_BOT_TOKEN:
         raise TelegramError("TELEGRAM_BOT_TOKEN is not set")
-    r = httpx.post(API.format(token=config.TELEGRAM_BOT_TOKEN, method=method), json=params, timeout=20)
-    data = r.json()
+    try:
+        r = httpx.post(API.format(token=config.TELEGRAM_BOT_TOKEN, method=method), json=params, timeout=20)
+        data = r.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise TelegramError(f"{method}: {type(exc).__name__}") from exc
+    if not isinstance(data, dict):
+        raise TelegramError(f"{method}: unexpected response")
     if not data.get("ok"):
         raise TelegramError(f"{method}: {data.get('description')}")
     return data["result"]
@@ -45,12 +50,14 @@ def set_webhook(url: str) -> dict:
 
 # ---------------- Login Widget verification ----------------
 
-def verify_login(params: dict, max_age_seconds: int = 86400) -> dict | None:
+def verify_login(params: dict, max_age_seconds: int = 3600) -> dict | None:
     """Check the Telegram Login Widget signature. Returns the user data if valid, else None.
 
     Telegram signs the fields with HMAC-SHA256, key = SHA256(bot_token).
     Never create a session without this check: anyone can type these fields into a URL.
     """
+    if not config.TELEGRAM_BOT_TOKEN:
+        return None  # the key would be SHA256(""), which anyone can compute: no bot, no login
     data = {k: v for k, v in params.items() if k != "hash"}
     received = params.get("hash", "")
     if not received or "id" not in data or "auth_date" not in data:

@@ -88,17 +88,27 @@ def _cited_ok(n, known: list[float]) -> bool:
     return any(abs(n - k) <= 5e-5 or (0 <= k <= 1 and abs(n - k * 100) <= 0.05) for k in known)
 
 
-def verify(output: dict, sent: dict) -> dict:
-    """Mark every cluster and suggestion verified only if all the numbers it cites were in the input."""
-    known = _numbers_in(sent)
+def _scope_numbers(sent: dict, members) -> list[float]:
+    """Numbers that belong to the event types / rules a claim is about, plus the global headline metrics.
+    Checking against the whole input would let any small count or weight 'verify' anything."""
+    out = _numbers_in(sent.get("headline", {}))
+    for m in members or []:
+        m = str(m)
+        key = m[5:] if m.startswith("base.") else m
+        out += _numbers_in(sent["event_types"].get(key, {})) + _numbers_in(sent["rules"].get(m, {}))
+    return out
 
-    def ok(nums):
-        return all(_cited_ok(n, known) for n in nums or [])
+
+def verify(output: dict, sent: dict) -> dict:
+    """A cluster or suggestion is verified only if it cites at least one number and every number it cites is
+    one we sent for the event types or rules it is about."""
+    def ok(nums, known):
+        return bool(nums) and all(_cited_ok(n, known) for n in nums)
     for c in output.get("clusters", []):
-        c["verified"] = ok(c.get("numbers"))
+        c["verified"] = ok(c.get("numbers"), _scope_numbers(sent, c.get("members")))
     output["suggestions"] = [s for s in output.get("suggestions", []) if s.get("weight_key") in scoring.RULE_LABELS]
     for s in output["suggestions"]:
-        s["verified"] = ok(s.get("numbers")) and bool(s.get("numbers"))
+        s["verified"] = ok(s.get("numbers"), _scope_numbers(sent, [s["weight_key"]]))
         s["label"] = scoring.RULE_LABELS[s["weight_key"]]
     return output
 

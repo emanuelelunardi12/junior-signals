@@ -85,7 +85,7 @@ def handle_command(user: dict, chat_id: int, text: str) -> None:
         db.set_user(uid, paused=0)
         _reply(chat_id, "Alerts resumed.")
     elif cmd == "/stop":
-        behaviour.forget_telegram_user(uid)
+        behaviour.forget_user(uid)
         db.delete_user(uid)
         _reply(chat_id, "Your account and data are deleted. Send /start any time to come back.")
     else:
@@ -96,7 +96,7 @@ PRIVACY = (
     "<b>What we record</b>\n"
     "Your watchlist and alert settings, the alerts we send you, and your Useful / Not useful taps.\n"
     "On the dashboard we also record reading behaviour (which signals you open, for how long, and source clicks) "
-    "under an anonymous session id, never your Telegram id, to learn which kinds of signals are worth scoring higher. "
+    "under a daily pseudonymous id, never your Telegram id, to learn which kinds of signals are worth scoring higher. "
     "A founder approves every change that learning proposes.\n\n"
     "/tracking off  stop recording reading behaviour\n/stop  delete your account and data\n"
     f"Details: {config.BASE_URL}/privacy"
