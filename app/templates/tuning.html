@@ -1,28 +1,147 @@
 {% extends "base.html" %}
+{% block title %}Weight tuning · Junior Signals{% endblock %}
+{% macro rate(m, key) -%}{{ m.get(key) | pct }}{%- endmacro %}
+{% macro evidence_table(m, avg) -%}
+<table class="stats evidence">
+  <tr><th>Seen</th><td>{{ m.impressions }} web impression{{ 's' if m.impressions != 1 }}{% if m.telegram_deliveries is defined %}, {{ m.telegram_deliveries }} Telegram deliver{{ 'ies' if m.telegram_deliveries != 1 else 'y' }}{% endif %}</td></tr>
+  <tr><th>Opened</th><td>{{ rate(m, 'open_rate') }}{% if avg %} <span class="small">(all types {{ avg.open_rate | pct }})</span>{% endif %}</td></tr>
+  <tr><th>Clicked to source</th><td>{{ rate(m, 'ctr') }}{% if avg %} <span class="small">(all types {{ avg.ctr | pct }})</span>{% endif %}</td></tr>
+  <tr><th>Scrolled past</th><td>{{ rate(m, 'skip_rate') }}</td></tr>
+  {% if m.avg_dwell is defined %}<tr><th>Reading time</th><td>{{ m.avg_dwell if m.avg_dwell is not none else '–' }}{{ ' s average when opened' if m.avg_dwell is not none }}</td></tr>{% endif %}
+  <tr><th>Rated useful</th><td>{{ m.likes }} of {{ m.ratings if m.ratings is defined else m.likes + m.dislikes }} ({{ rate(m, 'like_rate') }})</td></tr>
+</table>
+{%- endmacro %}
 {% block main %}
-<h1>Weight tuning report</h1>
-<p class="small">What users actually found useful. Use it to replace our starting guesses in <code>app/scoring.py</code>,
-and write every change in <code>docs/prompt_log.md</code>. Treat small samples with care: under about 20 ratings
-in a row, the percentage means little.</p>
+{% if msg %}<p class="banner" role="status">{{ msg }}</p>{% endif %}
+<div class="adminhead"><h1>Weight tuning</h1><p class="small">Weights version {{ version }}{{ ' (code defaults)' if version == 0 }}</p></div>
+<nav class="subnav" aria-label="Admin sections">
+  <a href="/admin">Signals</a>
+  <a href="/admin/tuning" aria-current="page">Weight tuning</a>
+  <a href="/admin/insights">AI insights</a>
+</nav>
+<p class="lede small">This is where the human sits. The learning loop reads how people use published signals and
+  <b>proposes</b> changes to the scoring weights. <b>Nothing changes until a founder approves it here.</b> Alerts keep
+  publishing automatically in the meantime; an approved change only affects signals scored after it.</p>
+<form method="post" action="/admin/tuning/run" class="inline-form"><button>Run a learning cycle now</button>
+  <span class="small">Runs daily on the server. Looks at the last {{ window }} days. Needs {{ rules.MIN_IMPRESSIONS }}+ impressions and {{ rules.MIN_RATINGS }}+ ratings per type before proposing anything.</span></form>
 
-<h2>By event type</h2>
-<table class="stats">
-  <tr><th>Event type</th><td><b>Useful</b></td></tr>
-  {% for r in by_event %}
-  <tr><th>{{ event_types.get(r.event_type, r.event_type) }}</th>
-    <td>{{ r.up or 0 }} of {{ r.n }}{% if r.n %} ({{ ((r.up or 0) / r.n * 100) | round | int }}%){% endif %}</td></tr>
-  {% else %}<tr><th>No ratings yet</th><td>Signals need Useful / Not useful taps first.</td></tr>{% endfor %}
-</table>
+<section class="panel first">
+  <h2>Proposed changes <span class="count">{{ proposals | length }} waiting for a decision</span></h2>
+  {% for p in proposals %}
+  <article class="review proposal" aria-labelledby="p-{{ p.id }}">
+    <h3 id="p-{{ p.id }}">{{ labels.get(p.weight_key, p.weight_key) }}:
+      <span class="change">{{ p.current_value }} → {{ p.proposed_value }}</span></h3>
+    <p class="small">{{ 'From behaviour' if p.source == 'behaviour' else 'From an AI insight suggestion' }}, {{ p.created_at[:10] }}.
+      {% if p.weight_key.startswith('base.') %}Affects every future signal of this event type.{% else %}Affects every future signal whose score uses this rule.{% endif %}</p>
+    <p>{{ p.rationale }}</p>
+    {% if p.evidence.metrics %}
+    <details open><summary>Evidence: the behaviour behind it</summary>{{ evidence_table(p.evidence.metrics, p.evidence.get('averages')) }}</details>
+    {% endif %}
+    <div class="actions publish">
+      <form method="post" action="/admin/tuning/{{ p.id }}/approve" class="row"
+            data-confirm="Change {{ labels.get(p.weight_key, p.weight_key) }} from {{ p.current_value }} to {{ p.proposed_value }} for every signal scored from now on?">
+        <label class="grow small">Note (optional)<input name="note" maxlength="500" placeholder="why you agree"></label>
+        <button class="primary">Approve</button>
+      </form>
+      <form method="post" action="/admin/tuning/{{ p.id }}/reject" class="row">
+        <label class="grow small">Reason (optional)<input name="note" maxlength="500" placeholder="e.g. sample too small"></label>
+        <button>Reject</button>
+      </form>
+    </div>
+  </article>
+  {% else %}
+  <p class="small">No proposals. The system proposes a change only when behaviour is consistent: liked <b>and</b> engaged
+    (raise), or disliked or ignored (lower). High clicks alone never raise a weight.</p>
+  {% endfor %}
+</section>
 
-<h2>By scoring rule</h2>
-<p class="small">Each rule counts every rated signal whose score included it, so a signal appears under several rules.</p>
-<table class="stats">
-  <tr><th>Rule</th><td><b>Useful</b></td></tr>
-  {% for label, n, up in by_rule %}
-  <tr><th>{{ label }}</th><td>{{ up }} of {{ n }} ({{ (up / n * 100) | round | int }}%)</td></tr>
-  {% else %}<tr><th>No ratings yet</th><td></td></tr>{% endfor %}
-</table>
+<section class="panel">
+  <h2>Did it work? <span class="count">before vs after each approved change</span></h2>
+  <p class="small">“Before”: the {{ window }} days before approval. “After”: behaviour on signals scored with the new
+    weights. Small samples mean little; under about 20 ratings, read the counts, not the percentages.</p>
+  {% if results %}
+  <div class="tablewrap"><table class="stats">
+    <thead><tr><th scope="col">Change</th><th scope="col">Like rate</th><th scope="col">Open rate</th><th scope="col">Click-through</th><th scope="col">Alert-tier like rate</th></tr></thead>
+    <tbody>
+    {% for p in results %}{% set b, a = p.result.before, p.result.after %}
+    <tr><td>{{ labels.get(p.weight_key, p.weight_key) }} {{ p.current_value }} → {{ p.proposed_value }}
+        <br><span class="small">{{ p.status }} {{ (p.decided_at or '')[:10] }}</span>
+        {% if p.status == 'approved' %}<form method="post" action="/admin/tuning/{{ p.id }}/revert" data-confirm="Restore the previous value ({{ p.current_value }})?"><button class="quiet">Revert</button></form>{% endif %}</td>
+      <td>{{ b.get('like_rate') | pct }} → {{ a.get('like_rate') | pct }} <span class="small">(n {{ b.get('ratings', 0) }} → {{ a.get('ratings', 0) }})</span></td>
+      <td>{{ b.get('open_rate') | pct }} → {{ a.get('open_rate') | pct }} <span class="small">(n {{ b.get('impressions', 0) }} → {{ a.get('impressions', 0) }})</span></td>
+      <td>{{ b.get('ctr') | pct }} → {{ a.get('ctr') | pct }}</td>
+      <td>{{ p.result.before_head.get('alert_like_rate') | pct }} → {{ p.result.after_head.get('alert_like_rate') | pct }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="small">No approved changes yet.</p>{% endif %}
+</section>
 
-<p class="small">{{ unrated }} sent signal{{ 's' if unrated != 1 }} with no rating. If this stays high, ask users directly;
-silence is not the same as "not useful".</p>
+<section class="panel">
+  <h2>Learning metric over time <span class="count">one row per learning cycle</span></h2>
+  {% if cycles %}
+  <div class="tablewrap"><table class="stats">
+    <thead><tr><th scope="col">Cycle</th><th scope="col">Events</th><th scope="col">Alert-tier opened</th><th scope="col">Alert-tier rated useful</th><th scope="col">Top-3 click-through</th><th scope="col">Weights</th><th scope="col">Proposals</th></tr></thead>
+    <tbody>
+    {% for cy in cycles %}
+    <tr><td>#{{ cy.id }} {{ cy.ran_at[:10] }}</td><td>{{ cy.events }}</td>
+      <td>{{ cy.metrics.alert_open_rate | pct }} <span class="small">of {{ cy.metrics.alert_impressions }}</span></td>
+      <td>{{ cy.metrics.alert_like_rate | pct }} <span class="small">of {{ cy.metrics.alert_ratings }}</span></td>
+      <td>{{ cy.metrics.top3_ctr | pct }} <span class="small">of {{ cy.metrics.top3_impressions }}</span></td>
+      <td>v{{ cy.metrics.weights_version }}</td><td>{{ cy.proposals }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="small">No cycles yet. Run one above.</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h2>Engagement by event type <span class="count">last {{ window }} days</span></h2>
+  <div class="tablewrap"><table class="stats">
+    <thead><tr><th scope="col">Event type</th><th scope="col">Seen</th><th scope="col">Opened</th><th scope="col">Clicked</th><th scope="col">Skipped</th><th scope="col">Reading</th><th scope="col">Useful</th></tr></thead>
+    <tbody>
+    {% for et, m in by_type.items() %}
+    <tr><th scope="row">{{ event_types.get(et, et) }}</th><td>{{ m.impressions }} web, {{ m.telegram_deliveries }} Telegram</td>
+      <td>{{ m.open_rate | pct }}</td><td>{{ m.ctr | pct }}</td><td>{{ m.skip_rate | pct }}</td>
+      <td>{{ m.avg_dwell if m.avg_dwell is not none else '–' }}{{ ' s' if m.avg_dwell is not none }}</td>
+      <td>{{ m.likes }} of {{ m.ratings }}{% if m.ratings %} ({{ m.like_rate | pct }}){% endif %}</td></tr>
+    {% else %}<tr><td colspan="7">No behaviour recorded yet.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+<section class="panel">
+  <h2>Weights in force</h2>
+  <p class="small">Code defaults live in <code>app/scoring.py</code>. Learning may move a weight at most {{ rules.MAX_DRIFT }}
+    from its default; beyond that, change the code and log it in <code>docs/prompt_log.md</code>.</p>
+  <div class="tablewrap"><table class="stats">
+    <thead><tr><th scope="col">Weight</th><th scope="col">Default</th><th scope="col">In force</th><th scope="col">Last change</th></tr></thead>
+    <tbody>
+    {% for w in weights %}
+    <tr><th scope="row">{{ w.label }}</th><td>{{ w.default }}</td><td><b>{{ w.value }}</b>{{ ' (changed)' if w.value != w.default }}</td>
+      <td class="small">{% if w.last %}{{ w.last.kind }} v{{ w.last.id }}, {{ w.last.changed_at[:10] }}{% else %}–{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+<section class="panel">
+  <h2>Useful rate by score line</h2>
+  <p class="small">Each line counts every rated signal whose score included it, so a signal appears under several lines.</p>
+  <table class="stats">
+    {% for label, n, up in by_line %}
+    <tr><th>{{ label }}</th><td>{{ up }} of {{ n }} ({{ (up / n * 100) | round | int }}%)</td></tr>
+    {% else %}<tr><th>No ratings yet</th><td></td></tr>{% endfor %}
+  </table>
+  <p class="small">{{ unrated }} published signal{{ 's' if unrated != 1 }} with no rating. Silence is not the same as “not useful”.</p>
+</section>
+
+{% if decided %}
+<section class="panel">
+  <h2>Decision log</h2>
+  <table class="stats">
+    {% for p in decided %}<tr><th>{{ (p.decided_at or '')[:10] }}</th><td><b>{{ p.status }}</b>: {{ labels.get(p.weight_key, p.weight_key) }} {{ p.current_value }} → {{ p.proposed_value }}{% if p.decision_note %} <span class="small">“{{ p.decision_note }}”</span>{% endif %}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
 {% endblock %}

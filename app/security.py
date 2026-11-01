@@ -16,6 +16,7 @@ LIMITS = {
     "watchlist": (30, 60),
     "login": (20, 60),
     "settings": (20, 60),
+    "insights": (3, 600),      # each run is a paid AI call
 }
 
 

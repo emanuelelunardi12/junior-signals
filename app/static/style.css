@@ -182,3 +182,13 @@ details.comment textarea { background: var(--paper); }
 .prose { max-width: 70ch; }
 .prose h2 { margin-top: 2rem; }
 .prose table { margin: .5rem 0 1rem; }
+
+/* learning loop pages */
+.inline-form { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin: 0 0 1rem; }
+.proposal h3 { font-size: 1.15rem; }
+.proposal .change { font-stretch: var(--narrow); color: var(--ochre); white-space: nowrap; }
+.evidence { max-width: 36rem; margin: .5rem 0; }
+.flag { color: var(--ochre); font-size: .8rem; font-weight: 600; margin-left: .4rem; }
+.ok { color: var(--patina); font-size: .8rem; font-weight: 600; margin-left: .4rem; }
+pre.json { font-size: .75rem; max-height: 20rem; overflow: auto; background: var(--paper); padding: .75rem; }
+button[disabled] { opacity: .5; cursor: not-allowed; }

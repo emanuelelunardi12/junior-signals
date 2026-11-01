@@ -50,6 +50,22 @@ def cmd_evaluate(a):
     evaluate.main(a.docs, a.key)
 
 
+def cmd_learn(a):
+    """One learning cycle: aggregates behaviour and PROPOSES weight changes. Applies nothing."""
+    from app import learning
+    out = learning.run_cycle(window_days=a.days)
+    print(f"Cycle {out['cycle_id']}: {out['events']} events, {len(out['proposals'])} proposal(s). "
+          f"Review them at {config.BASE_URL}/admin/tuning; nothing changes until a founder approves.")
+
+
+def cmd_insights(a):
+    """AI insight job: suggestions only, shown at /admin/insights."""
+    from app import insights
+    row = insights.run(window_days=a.days)
+    r = db.get().execute("SELECT status, note FROM ai_insights WHERE id=?", (row,)).fetchone()
+    print(f"Insight run {row}: {r['status']} {r['note'] or ''}".strip())
+
+
 def cmd_seed_demo(_):
     """Fake signals so the dashboard can be viewed without API keys. Never run against real data."""
     from app import demo
@@ -77,6 +93,8 @@ def main():
     e = sub.add_parser("evaluate"); e.add_argument("--docs", default="eval_data/docs")
     e.add_argument("--key", default="eval_data/answer_key.csv"); e.set_defaults(fn=cmd_evaluate)
     sub.add_parser("seed-demo").set_defaults(fn=cmd_seed_demo)
+    ln = sub.add_parser("learn"); ln.add_argument("--days", type=int, default=30); ln.set_defaults(fn=cmd_learn)
+    ins = sub.add_parser("insights"); ins.add_argument("--days", type=int, default=30); ins.set_defaults(fn=cmd_insights)
     a = p.parse_args()
     a.fn(a)
 

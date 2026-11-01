@@ -7,7 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app import config, digest, pipeline, telegram
+from app import config, digest, insights, learning, pipeline, telegram
 
 
 def notify_admins(text: str) -> None:
@@ -37,12 +37,37 @@ def run_digest_job() -> None:
         raise
 
 
+def run_learning_job() -> None:
+    """Proposes weight changes from behaviour. Applies nothing: a founder approves in /admin/tuning."""
+    try:
+        out = learning.run_cycle()
+        if out["proposals"]:
+            notify_admins(f"Learning cycle proposed {len(out['proposals'])} weight change(s). "
+                          f"Nothing changes until you approve: {config.BASE_URL}/admin/tuning")
+    except Exception as exc:
+        notify_admins(f"Learning cycle failed: {exc}")
+        raise
+
+
+def run_insights_job() -> None:
+    if not config.ANTHROPIC_API_KEY:
+        return
+    try:
+        insights.run()
+    except Exception as exc:
+        notify_admins(f"AI insight job failed: {exc}")
+        raise
+
+
 def start() -> BackgroundScheduler | None:
     if not config.RUN_SCHEDULER:
         return None
     s = BackgroundScheduler(timezone="UTC")
     s.add_job(run_pipeline_job, IntervalTrigger(hours=config.PIPELINE_INTERVAL_HOURS), id="pipeline")
     s.add_job(run_digest_job, CronTrigger(day_of_week=config.DIGEST_DAY, hour=config.DIGEST_HOUR), id="digest")
+    s.add_job(run_learning_job, IntervalTrigger(hours=config.LEARNING_INTERVAL_HOURS), id="learning")
+    s.add_job(run_insights_job, IntervalTrigger(hours=config.INSIGHTS_INTERVAL_HOURS), id="insights")
     s.start()
-    print(f"[scheduler] pipeline every {config.PIPELINE_INTERVAL_HOURS}h, digest weekly")
+    print(f"[scheduler] pipeline every {config.PIPELINE_INTERVAL_HOURS}h, learning every "
+          f"{config.LEARNING_INTERVAL_HOURS}h, AI insights every {config.INSIGHTS_INTERVAL_HOURS}h, digest weekly")
     return s

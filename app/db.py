@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS signals (
     reviewed_by  INTEGER,
     published_at TEXT,
     delivery     TEXT NOT NULL DEFAULT 'watchers',  -- watchers | feed_only | broadcast
-    status_note  TEXT                            -- why a signal was withheld or retracted
+    status_note  TEXT,                           -- why a signal was withheld or retracted
+    rule_keys    TEXT NOT NULL DEFAULT '[]',     -- JSON: weight key behind each breakdown line (learning per rule)
+    weights_version INTEGER NOT NULL DEFAULT 0   -- weight_changes.id in force when scored; 0 = code defaults
 );
 CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker, created_at);
 CREATE TABLE IF NOT EXISTS feedback (
@@ -121,6 +123,65 @@ CREATE TABLE IF NOT EXISTS comments (
     session_id  TEXT NOT NULL,
     signal_id   INTEGER REFERENCES signals(id),
     text        TEXT NOT NULL
+);
+-- ---------- learning loop (app/learning.py): the system proposes, a founder decides ----------
+-- One row per learning run: when it ran, how much behaviour it saw, and the headline learning metrics.
+CREATE TABLE IF NOT EXISTS learning_cycles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ran_at      TEXT NOT NULL,
+    window_days INTEGER NOT NULL,
+    events      INTEGER NOT NULL,
+    proposals   INTEGER NOT NULL,
+    metrics     TEXT NOT NULL                    -- JSON: alert-tier open/like rate, top-3 CTR, weights version
+);
+-- Per-event-type engagement at each cycle (open rate, like rate, click-through, skip rate, dwell).
+CREATE TABLE IF NOT EXISTS engagement_snapshots (
+    cycle_id    INTEGER NOT NULL REFERENCES learning_cycles(id),
+    event_type  TEXT NOT NULL,
+    impressions INTEGER NOT NULL, opens INTEGER NOT NULL, source_clicks INTEGER NOT NULL,
+    scroll_pasts INTEGER NOT NULL, telegram_deliveries INTEGER NOT NULL,
+    likes INTEGER NOT NULL, dislikes INTEGER NOT NULL,
+    open_rate REAL, like_rate REAL, ctr REAL, skip_rate REAL, avg_dwell REAL,
+    PRIMARY KEY (cycle_id, event_type)
+);
+-- A change the system wants to make to its own scoring. NEVER applied without a founder's approval.
+CREATE TABLE IF NOT EXISTS tuning_proposals (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at     TEXT NOT NULL,
+    cycle_id       INTEGER REFERENCES learning_cycles(id),
+    source         TEXT NOT NULL,                -- behaviour | ai_insight
+    weight_key     TEXT NOT NULL,                -- base.<event_type> or a rule key (scoring.RULE_LABELS)
+    current_value  INTEGER NOT NULL,
+    proposed_value INTEGER NOT NULL,
+    rationale      TEXT NOT NULL,
+    evidence       TEXT NOT NULL,                -- JSON: the behaviour numbers behind the proposal
+    status         TEXT NOT NULL DEFAULT 'proposed', -- proposed | approved | rejected | superseded | reverted
+    decided_by     INTEGER,
+    decided_at     TEXT,
+    decision_note  TEXT,
+    before_metric  TEXT,                         -- JSON snapshot taken at approval, for before/after
+    applied_version INTEGER                      -- weight_changes.id created by the approval
+);
+-- Append-only log of weights in force. Its latest id is the weights version stamped on every new signal.
+CREATE TABLE IF NOT EXISTS weight_changes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    weight_key  TEXT NOT NULL,
+    old_value   INTEGER NOT NULL,
+    new_value   INTEGER NOT NULL,
+    proposal_id INTEGER REFERENCES tuning_proposals(id),
+    kind        TEXT NOT NULL,                   -- approve | revert
+    changed_by  INTEGER NOT NULL,
+    changed_at  TEXT NOT NULL
+);
+-- AI insight runs: aggregated numbers in, clusters and suggestions out. Suggestion-only.
+CREATE TABLE IF NOT EXISTS ai_insights (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    model       TEXT,
+    status      TEXT NOT NULL,                   -- ok | skipped | failed
+    note        TEXT,
+    input       TEXT NOT NULL,                   -- JSON: exactly what was sent (numbers only)
+    output      TEXT                             -- JSON: clusters and suggestions, with a verified flag each
 );
 CREATE TABLE IF NOT EXISTS announcements (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,6 +249,8 @@ MIGRATIONS = [
     ("tickers", "price_symbol", "TEXT"),
     ("signals", "status_note", "TEXT"),
     ("users", "tracking_opt_out", "INTEGER NOT NULL DEFAULT 0"),
+    ("signals", "rule_keys", "TEXT NOT NULL DEFAULT '[]'"),
+    ("signals", "weights_version", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Data changes for older databases. Each statement is idempotent.

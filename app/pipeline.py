@@ -7,7 +7,7 @@ founder writes by hand start as drafts, and changes to the scoring weights need 
 import json
 from datetime import datetime, timedelta, timezone
 
-from app import ai, collectors, db, guardrails, prices, publish, scoring
+from app import ai, collectors, db, guardrails, learning, prices, publish, scoring
 
 # Approximate FX to convert deal sizes for the market-cap rule. Update occasionally; precision is not critical.
 APPROX_FX_TO_USD = {"USD": 1.0, "CAD": 0.72, "AUD": 0.65, "GBP": 1.3, "EUR": 1.1}
@@ -108,7 +108,10 @@ def process_document(doc, event_type: str | None = None, draft: bool = False, sk
             c.execute("UPDATE documents SET event_type=?, status='duplicate' WHERE id=?", (event_type, doc["id"]))
         return None
 
-    result = scoring.score_signal(event_type, f, build_context(doc["ticker"], f))
+    # Weights in force = code defaults + founder-approved changes. The version is stamped on the signal so the
+    # learning loop can compare behaviour before and after each approved change.
+    version = learning.weights_version()
+    result = scoring.score_signal(event_type, f, build_context(doc["ticker"], f), weights=learning.effective_weights())
     headline = f.get("headline") or title or scoring.EVENT_TYPES[event_type]
     phrase = guardrails.advice_phrase(headline)
     if phrase:  # red line: our words never read as advice. Replace the headline, keep the signal moving.
@@ -121,9 +124,11 @@ def process_document(doc, event_type: str | None = None, draft: bool = False, sk
     with db.tx() as c:
         cur = c.execute(
             """INSERT INTO signals (document_id, ticker, event_type, headline, fields, rejected, score, breakdown,
-               tier, status, dedupe_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               tier, status, dedupe_key, created_at, rule_keys, weights_version)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (doc["id"], doc["ticker"], event_type, headline, json.dumps(fields_json), json.dumps(rejected),
-             result.score, json.dumps(result.breakdown), result.tier, status, key, created_at or db.now()),
+             result.score, json.dumps(result.breakdown), result.tier, status, key, created_at or db.now(),
+             json.dumps(result.rules), version),
         )
         c.execute("UPDATE documents SET event_type=?, status='extracted' WHERE id=?", (event_type, doc["id"]))
         signal_id = cur.lastrowid

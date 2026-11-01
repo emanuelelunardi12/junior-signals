@@ -40,6 +40,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MODEL_CLASSIFY = os.getenv("MODEL_CLASSIFY", "claude-haiku-4-5-20251001")
 MODEL_EXTRACT = os.getenv("MODEL_EXTRACT", "claude-sonnet-5")
 MODEL_GRADE = os.getenv("MODEL_GRADE", "claude-sonnet-5")
+MODEL_INSIGHT = os.getenv("MODEL_INSIGHT", MODEL_EXTRACT)   # the weekly AI insight job (suggestion-only)
 MODEL_PRICES = _prices(os.getenv("MODEL_PRICES", ""))
 
 PRICE_SOURCE = os.getenv("PRICE_SOURCE", "none")          # none | stooq
@@ -47,6 +48,8 @@ RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "0") == "1"
 PIPELINE_INTERVAL_HOURS = float(os.getenv("PIPELINE_INTERVAL_HOURS", "0.5"))
 DIGEST_DAY = int(os.getenv("DIGEST_DAY", "0"))            # 0 = Monday
 DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "8"))
+LEARNING_INTERVAL_HOURS = float(os.getenv("LEARNING_INTERVAL_HOURS", "24"))   # learning cycle: proposes only
+INSIGHTS_INTERVAL_HOURS = float(os.getenv("INSIGHTS_INTERVAL_HOURS", "168"))  # AI insight job: suggests only
 
 _LOCAL = BASE_URL.startswith(("http://localhost", "http://127.0.0.1"))
 if not _DEV_LOGIN_SET and _LOCAL and not TELEGRAM_BOT_TOKEN:

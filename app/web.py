@@ -64,6 +64,13 @@ templates.env.globals["source_domain"] = telegram.source_domain
 templates.env.globals["event_types"] = scoring.EVENT_TYPES
 
 
+def pct(x) -> str:
+    return "–" if x is None else f"{x * 100:.0f}%"
+
+
+templates.env.filters["pct"] = pct
+
+
 def current_user(request: Request):
     uid = request.session.get("uid")
     return db.get_user(uid) if uid else None
@@ -416,13 +423,17 @@ def admin_edit(request: Request, signal_id: int, headline: str = Form(...),
     if adjustment and not reason.strip():
         return _back("Add a reason for the score adjustment. Users see it in the breakdown.")
     adjustment = max(-10, min(int(adjustment), 10))
-    parts = [p for p in json.loads(s["breakdown"]) if not p[0].startswith(REVIEWER_LABEL)]
+    old_parts, old_rules = json.loads(s["breakdown"]), json.loads(s["rule_keys"] or "[]")
+    keep = [i for i, p in enumerate(old_parts) if not p[0].startswith(REVIEWER_LABEL)]
+    parts = [old_parts[i] for i in keep]
+    rules = [old_rules[i] for i in keep if i < len(old_rules)]
     if adjustment:
         parts.append([f"{REVIEWER_LABEL}: {reason.strip()[:120]}", adjustment])
+        rules.append("reviewer_adjustment")
     score = sum(p for _, p in parts)
     with db.tx() as c:
-        c.execute("UPDATE signals SET headline=?, breakdown=?, score=?, tier=? WHERE id=?",
-                  (headline, json.dumps(parts), score, scoring.tier_for(score), signal_id))
+        c.execute("UPDATE signals SET headline=?, breakdown=?, score=?, tier=?, rule_keys=? WHERE id=?",
+                  (headline, json.dumps(parts), score, scoring.tier_for(score), json.dumps(rules), signal_id))
     return _back(f"Saved. Score is now {score}.")
 
 
@@ -517,30 +528,118 @@ def admin_promote_noise(request: Request, doc_id: int, event_type: str = Form(..
                  if signal_id else "Nothing could be extracted from that document.")
 
 
+# ---------------- learning loop: the human sits HERE, not in the alert path ----------------
+
+def _tuning_back(msg: str = "", page: str = "/admin/tuning"):
+    from urllib.parse import quote
+    return RedirectResponse(page + (f"?msg={quote(msg)}" if msg else ""), status_code=303)
+
+
 @app.get("/admin/tuning")
 def admin_tuning(request: Request):
-    """How often users call signals useful, by event type and by scoring rule. Evidence for changing weights."""
+    """Proposed self-modifications with their evidence, for a founder to approve or reject; weights in force;
+    before/after results of approved changes; learning metrics per cycle."""
+    from app import learning
     user = current_user(request)
     if not user or not is_admin(user["id"]):
         return _home()
     c = db.get()
-    by_event = c.execute(
-        """SELECT s.event_type, COUNT(*) n, SUM(f.useful) up FROM feedback f JOIN signals s ON s.id=f.signal_id
-           GROUP BY s.event_type ORDER BY n DESC""").fetchall()
-    rules: dict[str, list[int]] = {}
-    rows = c.execute("""SELECT s.breakdown, f.useful FROM feedback f JOIN signals s ON s.id=f.signal_id""").fetchall()
-    for r in rows:
+    proposals = [dict(p, evidence=json.loads(p["evidence"])) for p in c.execute(
+        "SELECT * FROM tuning_proposals WHERE status='proposed' ORDER BY id")]
+    decided = c.execute("""SELECT * FROM tuning_proposals WHERE status IN ('approved','rejected','reverted','superseded')
+                           ORDER BY decided_at DESC LIMIT 20""").fetchall()
+    results = [dict(p, result=learning.before_after(p)) for p in decided if p["status"] in ("approved", "reverted")]
+    cycles = [dict(r, metrics=json.loads(r["metrics"])) for r in c.execute(
+        "SELECT * FROM learning_cycles ORDER BY id DESC LIMIT 12")]
+    since = learning._ago(learning.WINDOW_DAYS)
+    by_type = behaviour.engagement_by_event_type(since=since)
+    by_rule = learning.engagement_by_rule(since=since)
+    # older report: Useful rate by breakdown line, works for every rated signal including pre-learning ones
+    lines: dict[str, list[int]] = {}
+    for r in c.execute("SELECT s.breakdown, f.useful FROM feedback f JOIN signals s ON s.id=f.signal_id"):
         for label, _pts in json.loads(r["breakdown"]):
-            key = label.split(":")[0].split("(")[0].strip()
-            stat = rules.setdefault(key, [0, 0])
+            stat = lines.setdefault(label.split(":")[0].split("(")[0].strip(), [0, 0])
             stat[0] += 1
             stat[1] += r["useful"]
-    by_rule = sorted(([k] + v for k, v in rules.items()), key=lambda x: -x[1])
-    unrated = c.execute("""SELECT COUNT(*) n FROM signals s WHERE s.published_at IS NOT NULL
+    by_line = sorted(([k] + v for k, v in lines.items()), key=lambda x: -x[1])
+    unrated = c.execute("""SELECT COUNT(*) n FROM signals s WHERE s.status='published'
                            AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.signal_id=s.id)""").fetchone()["n"]
     return templates.TemplateResponse(request, "tuning.html", {
-        "user": user, "admin": True, "by_event": by_event, "by_rule": by_rule, "unrated": unrated,
-        "event_types": scoring.EVENT_TYPES})
+        "user": user, "admin": True, "proposals": proposals, "decided": decided, "results": results,
+        "cycles": cycles, "by_type": by_type, "by_rule": by_rule, "by_line": by_line, "unrated": unrated,
+        "weights": learning.weight_table(), "version": learning.weights_version(), "labels": scoring.RULE_LABELS,
+        "rules": learning, "msg": request.query_params.get("msg"), "window": learning.WINDOW_DAYS})
+
+
+@app.post("/admin/tuning/run")
+def admin_tuning_run(request: Request):
+    """Run a learning cycle now. It only creates proposals."""
+    from app import learning
+    _admin_or_403(request)
+    out = learning.run_cycle()
+    n = len(out["proposals"])
+    return _tuning_back(f"Cycle {out['cycle_id']} done: {out['events']} events, {n} new proposal{'s' if n != 1 else ''}.")
+
+
+@app.post("/admin/tuning/{proposal_id}/{action}")
+def admin_tuning_decide(request: Request, proposal_id: int, action: str, note: str = Form("")):
+    """THE HUMAN SAFETY CHECK: a founder approves, rejects or reverts a proposed change to the scoring weights."""
+    from app import learning
+    user = _admin_or_403(request)
+    note = note.strip()[:500]
+    try:
+        if action == "approve":
+            version = learning.approve(proposal_id, user["id"], note)
+            return _tuning_back(f"Approved. Weights version {version} is in force for every signal scored from now on.")
+        if action == "reject":
+            learning.reject(proposal_id, user["id"], note)
+            return _tuning_back("Rejected. Nothing changed.")
+        if action == "revert":
+            version = learning.revert(proposal_id, user["id"])
+            return _tuning_back(f"Reverted. Weights version {version} restores the previous value.")
+    except learning.NotAllowed as exc:
+        return _tuning_back(str(exc))
+    raise HTTPException(404)
+
+
+@app.get("/admin/insights")
+def admin_insights(request: Request):
+    """AI-clustered behaviour patterns and suggested weights to revisit. Suggestion-only."""
+    user = current_user(request)
+    if not user or not is_admin(user["id"]):
+        return _home()
+    c = db.get()
+    runs = [dict(r, output=json.loads(r["output"]) if r["output"] else None)
+            for r in c.execute("SELECT * FROM ai_insights ORDER BY id DESC LIMIT 5")]
+    comments = c.execute("""SELECT m.*, s.ticker, s.headline FROM comments m LEFT JOIN signals s ON s.id=m.signal_id
+                            ORDER BY m.id DESC LIMIT 30""").fetchall()
+    return templates.TemplateResponse(request, "insights.html", {
+        "user": user, "admin": True, "runs": runs, "comments": comments, "model": config.MODEL_INSIGHT,
+        "has_key": bool(config.ANTHROPIC_API_KEY), "msg": request.query_params.get("msg")})
+
+
+@app.post("/admin/insights/run")
+def admin_insights_run(request: Request):
+    from app import insights
+    _admin_or_403(request)
+    if _limited(request, "insights"):
+        return _tuning_back("The insight job ran a moment ago. Try again later.", "/admin/insights")
+    row = insights.run()
+    r = db.get().execute("SELECT status, note FROM ai_insights WHERE id=?", (row,)).fetchone()
+    return _tuning_back({"ok": "Insight run finished.", "skipped": f"Skipped: {r['note']}",
+                         "failed": f"Failed: {r['note']}"}[r["status"]], "/admin/insights")
+
+
+@app.post("/admin/insights/{insight_id}/propose/{index}")
+def admin_insight_propose(request: Request, insight_id: int, index: int):
+    """Turn an AI suggestion into a normal proposal. It still has to be approved on /admin/tuning."""
+    from app import insights
+    _admin_or_403(request)
+    pid = insights.suggestion_to_proposal(insight_id, index)
+    if pid is None:
+        return _tuning_back("Could not create a proposal (already open, out of range, or a 'review' suggestion).",
+                            "/admin/insights")
+    return _tuning_back("Proposal created from the AI suggestion. Approve or reject it here.")
 
 
 @app.post("/admin/announce")

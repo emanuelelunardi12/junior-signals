@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}AI insights · Junior Signals{% endblock %}
+{% block main %}
+{% if msg %}<p class="banner" role="status">{{ msg }}</p>{% endif %}
+<div class="adminhead"><h1>AI insights</h1><p class="small">Model: {{ model }}</p></div>
+<nav class="subnav" aria-label="Admin sections">
+  <a href="/admin">Signals</a>
+  <a href="/admin/tuning">Weight tuning</a>
+  <a href="/admin/insights" aria-current="page">AI insights</a>
+</nav>
+<p class="lede small">Once a week the server sends the <b>aggregated</b> behaviour numbers (per event type and per scoring
+  rule; no comments, no user or session ids, no tickers) to the AI, which clusters the patterns and suggests weights to
+  revisit. <b>Suggestion-only:</b> nothing changes. You can turn a suggestion into a proposal, which then needs approval on
+  <a href="/admin/tuning">Weight tuning</a> like any other. Every number the AI cites is checked against what we sent.</p>
+<form method="post" action="/admin/insights/run" class="inline-form">
+  <button {{ 'disabled' if not has_key }}>Run the insight job now</button>
+  <span class="small">{{ 'One paid AI call. Skipped automatically when there is too little behaviour to say anything.' if has_key else 'Set ANTHROPIC_API_KEY to enable.' }}</span>
+</form>
+
+{% for r in runs %}
+<section class="panel {{ 'first' if loop.first }}">
+  <h2>Run #{{ r.id }} <span class="count">{{ r.created_at[:16] | replace('T', ' ') }} UTC · {{ r.status }}</span></h2>
+  {% if r.note %}<p class="small">{{ r.note }}</p>{% endif %}
+  {% if r.output %}
+    <h3>Patterns</h3>
+    {% for c in r.output.clusters %}
+      <p><b>{{ c.label }}</b> <span class="small">({{ c.members | join(', ') }})</span>
+        {% if not c.verified %}<span class="flag">numbers not verified</span>{% endif %}<br>{{ c.pattern }}</p>
+    {% else %}<p class="small">No clusters.</p>{% endfor %}
+    <h3>Suggested weights to revisit</h3>
+    <div class="tablewrap"><table class="stats">
+      {% for s in r.output.suggestions %}
+      <tr><th>{{ s.label }}</th>
+        <td><b>{{ s.direction }}</b>: {{ s.rationale }}
+          <br><span class="small">Cited numbers: {{ s.numbers | join(', ') }}</span>
+          {% if s.verified %}<span class="ok">verified against the input</span>{% else %}<span class="flag">NOT verified: cites numbers we did not send</span>{% endif %}
+          {% if s.direction in ('raise', 'lower') %}
+          <form method="post" action="/admin/insights/{{ r.id }}/propose/{{ loop.index0 }}" class="inline">
+            <button>Turn into a proposal</button></form>
+          {% endif %}</td></tr>
+      {% else %}<tr><td>No suggestions.</td></tr>{% endfor %}
+    </table></div>
+    {% if r.output.caveats %}<h3>Caveats</h3><ul class="small">{% for c in r.output.caveats %}<li>{{ c }}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
+  <details><summary>What was sent to the AI</summary><pre class="json">{{ r.input }}</pre></details>
+</section>
+{% else %}
+<p class="small panel first">No insight runs yet.</p>
+{% endfor %}
+
+<section class="panel">
+  <h2>User comments <span class="count">side input only</span></h2>
+  <p class="small">Read these for context. They are not used by the learning loop and never sent to the AI.</p>
+  {% if comments %}
+  <table class="stats">
+    {% for m in comments %}<tr><th>{{ m.created_at[:10] }}</th><td>{% if m.ticker %}<span class="ticker">{{ m.ticker }}</span> <span class="small">{{ m.headline }}</span><br>{% endif %}{{ m.text }}</td></tr>{% endfor %}
+  </table>
+  {% else %}<p class="small">No comments yet.</p>{% endif %}
+</section>
+{% endblock %}
