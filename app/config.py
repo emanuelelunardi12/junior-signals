@@ -11,7 +11,12 @@ load_dotenv(ENV_FILE)
 
 
 def _ids(raw: str) -> set[int]:
-    return {int(x) for x in raw.split(",") if x.strip()}
+    return {int(x) for x in raw.replace(" ", "").split(",") if x.strip().isdigit()}
+
+
+def _env(name: str, default: str) -> str:
+    """Like os.getenv, but an empty value (e.g. a secret left blank on the host) falls back to the default."""
+    return os.getenv(name) or default
 
 
 def _prices(raw: str) -> dict[str, tuple[float, float]]:
@@ -39,13 +44,13 @@ _DEV_LOGIN_SET = os.getenv("DEV_LOGIN", "") != ""
 DEV_LOGIN = os.getenv("DEV_LOGIN", "0") == "1"
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-MODEL_CLASSIFY = os.getenv("MODEL_CLASSIFY", "claude-haiku-4-5-20251001")
-MODEL_EXTRACT = os.getenv("MODEL_EXTRACT", "claude-sonnet-5")
-MODEL_GRADE = os.getenv("MODEL_GRADE", "claude-sonnet-5")
-MODEL_INSIGHT = os.getenv("MODEL_INSIGHT", MODEL_EXTRACT)   # the weekly AI insight job (suggestion-only)
+MODEL_CLASSIFY = _env("MODEL_CLASSIFY", "claude-haiku-4-5-20251001")
+MODEL_EXTRACT = _env("MODEL_EXTRACT", "claude-sonnet-5")
+MODEL_GRADE = _env("MODEL_GRADE", "claude-sonnet-5")
+MODEL_INSIGHT = _env("MODEL_INSIGHT", MODEL_EXTRACT)   # the weekly AI insight job (suggestion-only)
 MODEL_PRICES = _prices(os.getenv("MODEL_PRICES", ""))
 
-PRICE_SOURCE = os.getenv("PRICE_SOURCE", "none")          # none | stooq
+PRICE_SOURCE = _env("PRICE_SOURCE", "none")          # none | stooq
 RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "0") == "1"
 PIPELINE_INTERVAL_HOURS = float(os.getenv("PIPELINE_INTERVAL_HOURS", "0.5"))
 DIGEST_DAY = int(os.getenv("DIGEST_DAY", "0"))            # 0 = Monday
@@ -63,8 +68,8 @@ if PUBLIC and DEV_LOGIN:
     # The test login lets anyone become any user (and, with no ADMIN_IDS, an admin). Never on a public URL.
     DEV_LOGIN, DEV_LOGIN_BLOCKED = False, True
 
-SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "JuniorSignals student project contact@example.com")
-DATABASE_PATH = ROOT / os.getenv("DATABASE_PATH", "data/signals.db")
+SEC_USER_AGENT = _env("SEC_USER_AGENT", "JuniorSignals student project contact@example.com")
+DATABASE_PATH = ROOT / _env("DATABASE_PATH", "data/signals.db")
 UNIVERSE_PATH = ROOT / "config" / "universe.yaml"
 
 # Download the SEC's NASDAQ/NYSE listing file at startup when we have none yet (needs outbound HTTPS to sec.gov).

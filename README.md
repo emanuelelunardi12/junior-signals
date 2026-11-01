@@ -3,7 +3,9 @@
 Early operational signals on junior mining and oil & gas stocks, delivered by Telegram, with a small web dashboard.
 
 **Flow:** collect documents (newswire RSS, SEC EDGAR, manual) → classify → extract with quotes (Maker) →
-quote check + Grader → rule-based score → human review for alert-tier signals → Telegram alerts and dashboard.
+quote check + Grader → rule-based score → red-line checks → **published automatically** to Telegram and the dashboard.
+User behaviour on published signals feeds a learning loop that **proposes** scoring changes; a founder approves them
+in `/admin/tuning`. See `architecturedoc.md` for the why.
 
 ## Run it locally in 5 minutes (no API keys)
 
@@ -47,18 +49,36 @@ user directly. If they decline, the dashboard shows a banner with a link to star
 4. Documents from SEDAR+/SEDI or company sites: save the text and run
    `python -m app.cli ingest --ticker EXMP.V --url <link> --file doc.txt`, then `python -m app.cli run --no-collect`.
 
-## Admin: deciding what gets pushed
+## Admin
 
-`/admin` (only for Telegram IDs in `ADMIN_IDS`):
-- **Review queue:** alert-tier signals from the pipeline and every signal you create. Edit the headline, add a
-  score adjustment (needs a reason; users see it as a line in the breakdown), then choose:
-  **Send to watchers** (users following the ticker with a threshold at or below the score),
-  **Add to feed only** (dashboard, no Telegram message), **Broadcast to everyone**, or **Reject**.
-  Buttons show how many users each option reaches.
-- **Create a signal from a document:** paste a filing or release you read yourself, with its source link.
-  It runs through the same AI checks and scoring, then waits in the queue. You can set the event type yourself
-  to skip AI classification, and resubmit a document the AI marked as noise.
-- **Announcement to all users:** a plain message not tied to a ticker. Logged with the number of recipients.
+`/admin` (only for Telegram IDs in `ADMIN_IDS`). Nothing here holds an alert up: pipeline signals publish automatically.
+- **Live now:** recently published signals and how many people got each. **Retract** takes one down and sends a
+  correction to exactly those people.
+- **Withheld:** signals that failed a red line (no source link, no verbatim quote, advice) and were never shown.
+- **Your drafts:** only signals you create by hand. Edit the headline, add a score adjustment (needs a reason; users see
+  it), then **Send to watchers**, **Add to feed only**, **Broadcast to everyone** or **Discard**.
+- **Create a signal from a document:** paste a filing or release you read yourself (SEDAR+, SEDI), with its source link.
+- **Ticker universe:** coverage per exchange; upload a TMX issuer list (CSV) for TSX or TSX Venture; refresh the SEC list.
+- **Announcement to all users**, and **Connect the Telegram webhook** after deploying.
+
+`/admin/tuning`: the learning loop. Proposed weight changes with the behaviour behind them; **Approve**, **Reject**,
+later **Revert**. Also before/after results of approved changes, the learning metric per cycle, engagement per event type
+and the weights in force. `/admin/insights`: the weekly AI insight job (suggestion-only) and user comments.
+
+## Ticker universe
+
+NASDAQ and NYSE listings come from the SEC's public file and load automatically on the server (or
+`python -m app.cli load-listings --source sec [--file saved.json]`). TSX and TSX Venture lists are TMX's; their terms
+forbid automated copying, so download the issuer list yourself, save the sheet as CSV and load it in `/admin` or with
+`python -m app.cli load-listings --source tmx --exchange TSXV --file tsxv.csv`. Users see per ticker whether we cover it
+(EDGAR, newswire, or not yet).
+
+## Behaviour tracking and privacy
+
+The dashboard records impressions, opens, reading time, scroll-past, source clicks, ratings and watchlist changes under
+an anonymous session id (`app/behaviour.py`). Users can opt out on the dashboard, with `/tracking off` in Telegram, or
+via Global Privacy Control. The user-facing note is at `/privacy`. Run a learning cycle by hand with
+`python -m app.cli learn`; it only proposes.
 
 ## Weekly digest, retro study, prices
 
@@ -72,7 +92,7 @@ user directly. If they decline, the dashboard shows a banner with a link to star
   "already moved" rule. Without it the rule is skipped and everything else works.
 - **Documents the AI skipped:** `/admin` lists recent documents classified as noise. Check a sample every week
   and promote any real event; this is the only check that catches missed signals.
-- **Weight tuning:** `/admin/tuning` shows the useful rate by event type and by scoring rule.
+- **Weight tuning:** `/admin/tuning` (see Admin above).
 
 ## Scheduling
 
@@ -88,9 +108,15 @@ Put ~50 real releases in `eval_data/docs/` and your manual answers in `eval_data
 (one example included), fill `MODEL_PRICES`, then `python -m app.cli evaluate`. It prints accuracy, invented
 facts, time, tokens and cost for both setups.
 
-## Deploy
+## Deploy (Render)
 
-`Dockerfile` and `render.yaml` are included. On Render: create a web service from the repo, add the secret
-variables (token, bot username, webhook secret, admin IDs, API key, BASE_URL), and keep the disk mounted at
-`/data` so the SQLite database survives deploys. Any other host running Python works the same way; move to
-Postgres when there are more users. GitHub Actions runs the test suite on every push.
+1. Render dashboard → **New → Blueprint** → pick this repository. `render.yaml` creates a Docker web service
+   (`starter`, about $7/month) with a 1 GB disk at `/data` ($0.25/month) for the SQLite file, health check `/healthz`.
+2. Fill in the secrets it asks for: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `ADMIN_IDS` (your Telegram user id),
+   `ANTHROPIC_API_KEY`, `SEC_USER_AGENT` ("JuniorSignals your@email"). `SESSION_SECRET` and `TELEGRAM_WEBHOOK_SECRET`
+   are generated; `BASE_URL` defaults to the Render URL.
+3. BotFather: `/setdomain` → the Render domain (enables the login button).
+4. Log in with Telegram, open `/admin`, press **Connect the Telegram webhook**.
+
+The app refuses to start on an https URL with a weak `SESSION_SECRET`, and the test login is always off there.
+GitHub Actions runs the test suite on every push. Move to Postgres when there are more users.
