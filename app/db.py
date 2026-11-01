@@ -1,6 +1,7 @@
 """SQLite storage. Plain sqlite3 on purpose: easy to inspect, easy to swap for Postgres later."""
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS signals (
     weights_version INTEGER NOT NULL DEFAULT 0   -- weight_changes.id in force when scored; 0 = code defaults
 );
 CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker, created_at);
+CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status, created_at);
 CREATE TABLE IF NOT EXISTS feedback (
     signal_id  INTEGER NOT NULL REFERENCES signals(id),
     user_id    INTEGER NOT NULL,
@@ -102,6 +104,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     sent_at    TEXT NOT NULL,
     PRIMARY KEY (signal_id, user_id)
 );
+CREATE INDEX IF NOT EXISTS idx_deliveries_user ON deliveries(user_id);
 -- Implicit behaviour on published signals: the fuel of the learning loop (app/behaviour.py).
 -- No user id is stored, only an anonymous session id. event_type and ticker are copied from the signal on the
 -- server, never taken from the browser.
@@ -222,38 +225,65 @@ def connect(path=None) -> sqlite3.Connection:
     path = path or config.DATABASE_PATH
     if str(path) != ":memory:":
         config.DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    if str(path) != ":memory:":
+        # WAL lets the web app keep reading while the scheduler or a CLI run writes; busy_timeout waits briefly
+        # instead of failing when another process holds the write lock.
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
-_conn: sqlite3.Connection | None = None
+# One connection PER THREAD. A sqlite3 connection must not be used by two threads at once (request threads,
+# the scheduler thread and the SEC download thread would otherwise share it and corrupt each other's cursors).
+# SQLite itself coordinates the per-thread connections through the file's locks (WAL mode, busy_timeout).
+_local = threading.local()
+_shared: sqlite3.Connection | None = None      # set by use(): tests run on one in-memory connection
+_initialised: set[str] = set()
+_init_lock = threading.Lock()
 
 
 def get() -> sqlite3.Connection:
-    """Shared connection for the app. Tests replace it with use()."""
-    global _conn
-    if _conn is None:
-        _conn = connect()
-        init(_conn)
-    return _conn
+    """This thread's connection to the database file (or the connection installed with use())."""
+    if _shared is not None:
+        return _shared
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = connect()
+        with _init_lock:
+            key = str(config.DATABASE_PATH)
+            if key not in _initialised:   # schema and migrations once per database file per process
+                init(conn)
+                _initialised.add(key)
+        _local.conn = conn
+    return conn
 
 
-def use(conn: sqlite3.Connection) -> None:
-    global _conn
-    _conn = conn
+def use(conn: sqlite3.Connection | None) -> None:
+    """Install one connection for every thread (tests), or None to go back to per-thread file connections."""
+    global _shared
+    _shared = conn
+
+
+# One connection is shared by request threads and the scheduler thread. Writes go through tx(), and this lock
+# makes each write transaction exclusive, so one thread's commit or rollback never includes another's half-done
+# writes. Transactions are short (a few rows), so the lock is held for milliseconds.
+_write_lock = threading.RLock()
 
 
 @contextmanager
 def tx():
-    conn = get()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    with _write_lock:
+        conn = get()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 MIGRATIONS = [

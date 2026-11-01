@@ -18,7 +18,7 @@
     {% if user %}
     <nav>
       <a href="/dashboard">Signals</a>
-      {% if admin or request.url.path.startswith('/admin') %}<a href="/admin">Review</a>{% endif %}
+      {% if admin or request.url.path.startswith('/admin') %}<a href="/admin">Admin</a>{% endif %}
       <a href="/logout">Log out</a>
     </nav>
     {% endif %}

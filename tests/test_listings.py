@@ -117,6 +117,10 @@ def test_search_endpoint_and_dashboard_results(monkeypatch):
     assert got == [{"symbol": "EXG", "exchange": "NYSE", "name": "Example Gold Corp", "coverage": "EDGAR"}]
     body = c.get("/dashboard?q=gold").text
     assert "Example Gold Corp" in body and 'value="EXG"' in body
+    c.post("/watchlist/add", data={"symbol": "EXMP.V"})
+    c.post("/watchlist/add", data={"symbol": "DEMO"})
+    body = c.get("/dashboard").text            # regression: the search box must not show SQL placeholders
+    assert 'name="q" value=""' in body and "No listing matches" not in body
 
 
 def test_admin_loads_a_tmx_file(monkeypatch):

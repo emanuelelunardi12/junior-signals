@@ -3,7 +3,7 @@
   --paper: #EEF1EF;
   --sheet: #FAFBFA;
   --ink: #1F2B33;
-  --muted: #66757D;
+  --muted: #5B6970;   /* 4.9:1 on --paper, AA for small text */
   --rule: #CDD5D2;
   --ochre: #B5701C;
   --patina: #3D7C6B;

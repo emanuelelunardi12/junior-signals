@@ -269,10 +269,10 @@ def dashboard(request: Request, t: str | None = None, type: str | None = None, q
                WHERE s.ticker=? AND s.status='published' {type_sql} ORDER BY s.created_at DESC LIMIT 100""",
             [active] + type_args).fetchall()
     elif wl:
-        q = ",".join("?" * len(wl))
+        marks = ",".join("?" * len(wl))
         signals = c.execute(
             f"""SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
-                WHERE s.ticker IN ({q}) AND s.status='published' AND s.tier!='archive' {type_sql}
+                WHERE s.ticker IN ({marks}) AND s.status='published' AND s.tier!='archive' {type_sql}
                 ORDER BY s.created_at DESC LIMIT 100""", wl + type_args).fetchall()
     else:
         signals = []
