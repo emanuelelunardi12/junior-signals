@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% from "_signal.html" import card %}
+{% block title %}{{ active ~ ' · ' if active }}Signals · Junior Signals{% endblock %}
+{% block scripts %}<script src="/static/track.js" defer></script>{% endblock %}
 {% block main %}
+{% if msg %}<p class="banner" role="status">{{ msg }}</p>{% endif %}
 {% if not user.can_message %}
 <p class="banner">Alerts can't reach you yet.
   {% if bot_link %}<a href="{{ bot_link }}">Open the bot in Telegram and tap Start</a>, then refresh this page.
@@ -8,12 +11,12 @@
 {% endif %}
 
 <nav class="tabs" aria-label="Watchlist">
-  <a href="/dashboard" class="{{ 'current' if not active }}">All</a>
-  {% for t in watchlist %}<a href="/dashboard?t={{ t }}" class="{{ 'current' if active == t }}">{{ t }}</a>{% endfor %}
+  <a href="/dashboard{{ '?type=' ~ etype if etype }}" class="{{ 'current' if not active }}" {{ 'aria-current="page"' | safe if not active }}>All</a>
+  {% for t in watchlist %}<a href="/dashboard?t={{ t | urlencode }}{{ '&type=' ~ etype if etype }}" class="{{ 'current' if active == t }}" {{ 'aria-current="page"' | safe if active == t }}>{{ t }}</a>{% endfor %}
 </nav>
 
 <div class="layout">
-  <section class="feed">
+  <section class="feed" aria-label="Signals">
     {% if active %}
       <div class="tickerhead">
         <h1>{{ active }} <span>{{ names.get(active, '') }}</span></h1>
@@ -21,18 +24,34 @@
           <button class="quiet">Remove from watchlist</button></form>
       </div>
     {% endif %}
+    {% if watchlist %}
+    <nav class="filters" aria-label="Filter by event type">
+      <a href="/dashboard{{ '?t=' ~ active if active }}" class="{{ 'on' if not etype }}">All types</a>
+      {% for k, v in event_types.items() %}
+        <a href="/dashboard?type={{ k }}{{ '&t=' ~ active if active }}" class="{{ 'on' if etype == k }}" {{ 'aria-current="true"' | safe if etype == k }}>{{ v }}</a>
+      {% endfor %}
+    </nav>
+    {% endif %}
     {% for s in signals %}
-      {{ card(s, names, feedback.get(s.id)) }}
+      {{ card(s, names, feedback.get(s.id), position=loop.index0) }}
     {% else %}
       <div class="empty">
         {% if not watchlist %}
-          <h2>Add your first ticker</h2><p>Pick the names you trade from the list on the right. New signals on them appear here and in Telegram.</p>
+          <h2>Add your first ticker</h2>
+          <ol class="onboard">
+            <li><b>Pick the names you trade.</b> Use “Add a ticker”. We cover junior mining and oil &amp; gas names; you can also request one we don't track yet.</li>
+            <li><b>Get signals as they happen.</b> Strategic stakes, ownership thresholds, key hires and financings, read from primary sources and published automatically within minutes.</li>
+            <li><b>Check the evidence.</b> Every signal shows a verbatim quote, a link to the source, and the rules behind its score.</li>
+          </ol>
           {% if dev_login %}
           <form method="post" action="/dev/demo"><button class="primary">Load demo data</button></form>
           <p class="small">Development only: adds example signals and puts EXMP.V and DEMO on your watchlist.</p>
           {% endif %}
+        {% elif etype %}
+          <h2>No {{ event_types[etype] | lower }} signals</h2>
+          <p>Nothing of this type on {{ active or 'your watchlist' }} yet. <a href="/dashboard{{ '?t=' ~ active if active }}">Show all types</a>.</p>
         {% else %}
-          <h2>No signals yet</h2><p>Nothing has cleared the scoring bar on {{ active or 'your watchlist' }}. We check sources every few hours.</p>
+          <h2>No signals yet</h2><p>Nothing has cleared the scoring bar on {{ active or 'your watchlist' }}. We check sources every 30 minutes and publish the moment something scores.</p>
           {% if dev_login %}<form method="post" action="/dev/demo"><button>Load demo data</button></form>{% endif %}
         {% endif %}
       </div>
@@ -55,9 +74,12 @@
       <label>Send me alerts for scores of
         <input type="number" name="alert_threshold" min="1" max="20" value="{{ user.alert_threshold }}"> or more</label>
       <label class="check"><input type="checkbox" name="paused" {{ 'checked' if user.paused }}> Pause alerts</label>
-      <button>Save alert settings</button>
+      <label class="check"><input type="checkbox" name="no_tracking" {{ 'checked' if user.tracking_opt_out }}> Don't record my reading behaviour</label>
+      <button>Save settings</button>
     </form>
     <p class="small">Alerts are published automatically as soon as a source document is scored, each with its source link and a verbatim quote. Information only, not investment advice.</p>
+    <p class="small privacy-note">{% if track %}We record which signals you open, read and click, under an anonymous id, to learn which kinds deserve higher scores. A founder approves every change.{% else %}Reading behaviour is not being recorded for you{% if user.tracking_opt_out %} (you opted out){% else %} (your browser sends Global Privacy Control){% endif %}.{% endif %}
+      <a href="/privacy">Privacy</a></p>
   </aside>
 </div>
 {% endblock %}

@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
     can_message     INTEGER NOT NULL DEFAULT 0,   -- 1 once the bot has successfully messaged them
     alert_threshold INTEGER NOT NULL DEFAULT 8,
     paused          INTEGER NOT NULL DEFAULT 0,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    tracking_opt_out INTEGER NOT NULL DEFAULT 0   -- 1 = record no reading behaviour for this user
 );
 CREATE TABLE IF NOT EXISTS tickers (
     symbol          TEXT PRIMARY KEY,
@@ -86,6 +87,41 @@ CREATE TABLE IF NOT EXISTS deliveries (
     sent_at    TEXT NOT NULL,
     PRIMARY KEY (signal_id, user_id)
 );
+-- Implicit behaviour on published signals: the fuel of the learning loop (app/behaviour.py).
+-- No user id is stored, only an anonymous session id. event_type and ticker are copied from the signal on the
+-- server, never taken from the browser.
+CREATE TABLE IF NOT EXISTS behaviour_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,                   -- random per web login; daily keyed hash for Telegram taps
+    surface     TEXT NOT NULL,                   -- web | telegram
+    action      TEXT NOT NULL,                   -- impression | open | dwell | scroll_past | source_click | like | dislike | like_cleared
+    signal_id   INTEGER NOT NULL REFERENCES signals(id),
+    event_type  TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    value       REAL,                            -- dwell: seconds the opened signal was on screen (capped)
+    position    INTEGER                          -- impression: place in the list, 0 = top
+);
+CREATE INDEX IF NOT EXISTS idx_behaviour_type ON behaviour_events(event_type, action, created_at);
+CREATE INDEX IF NOT EXISTS idx_behaviour_signal ON behaviour_events(signal_id, action);
+-- Watchlist actions and feed filters, same anonymity rules.
+CREATE TABLE IF NOT EXISTS watchlist_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    surface     TEXT NOT NULL,                   -- web | telegram
+    action      TEXT NOT NULL,                   -- add | remove | filter
+    ticker      TEXT,                            -- add / remove
+    event_type  TEXT                             -- filter: the event type the user narrowed the feed to
+);
+-- Optional free-text comments on a signal. Side input only: never fed to the learning loop or to the AI.
+CREATE TABLE IF NOT EXISTS comments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    signal_id   INTEGER REFERENCES signals(id),
+    text        TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS announcements (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     text       TEXT NOT NULL,
@@ -151,6 +187,7 @@ MIGRATIONS = [
     ("signals", "delivery", "TEXT NOT NULL DEFAULT 'watchers'"),
     ("tickers", "price_symbol", "TEXT"),
     ("signals", "status_note", "TEXT"),
+    ("users", "tracking_opt_out", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Data changes for older databases. Each statement is idempotent.
@@ -204,7 +241,7 @@ def upsert_user(user_id: int, first_name: str | None, username: str | None) -> N
 
 
 def set_user(user_id: int, **fields) -> None:
-    allowed = {"can_message", "alert_threshold", "paused"}
+    allowed = {"can_message", "alert_threshold", "paused", "tracking_opt_out"}
     cols = [k for k in fields if k in allowed]
     if not cols:
         return

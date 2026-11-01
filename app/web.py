@@ -4,12 +4,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import bot, config, db, publish, scoring, telegram
+from app import behaviour, bot, config, db, publish, scoring, security, telegram
 
 HERE = Path(__file__).parent
 
@@ -94,7 +94,9 @@ def index(request: Request):
 def _start_session(request: Request, uid: int, first_name: str | None, username: str | None):
     new = db.get_user(uid) is None
     db.upsert_user(uid, first_name, username)
+    request.session.clear()
     request.session["uid"] = uid
+    request.session["sid"] = behaviour.new_session_id()  # fresh anonymous id at every login
     user = db.get_user(uid)
     if new or not user["can_message"]:
         # Login asked for permission to message; the only reliable check is to try.
@@ -119,7 +121,9 @@ def dev_login(request: Request, user_id: int = Form(...), first_name: str = Form
     if not config.DEV_LOGIN:
         raise HTTPException(404)
     db.upsert_user(user_id, first_name, None)
+    request.session.clear()
     request.session["uid"] = user_id
+    request.session["sid"] = behaviour.new_session_id()
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -136,6 +140,19 @@ def dev_demo(request: Request):
     return RedirectResponse("/dashboard", status_code=303)
 
 
+@app.get("/privacy")
+def privacy(request: Request):
+    """Plain-language note on what behaviour we record, why, and how to opt out. Public."""
+    user = current_user(request)
+    return templates.TemplateResponse(request, "privacy.html", {
+        "user": user, "admin": bool(user and is_admin(user["id"])), "retention_days": behaviour_retention_days(),
+        "gpc": request.headers.get("sec-gpc", "").strip() == "1"})
+
+
+def behaviour_retention_days() -> int:
+    return config.BEHAVIOUR_RETENTION_DAYS
+
+
 @app.get("/logout")
 def logout(request: Request):
     request.session.clear()
@@ -144,25 +161,51 @@ def logout(request: Request):
 
 # ---------------- dashboard ----------------
 
+TICKER_RE = __import__("re").compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
+
+
+def clean_symbol(raw: str | None) -> str | None:
+    """Tickers are short uppercase symbols (EXMP.V, ABX.TO, BHP). Anything else is rejected."""
+    sym = (raw or "").strip().upper()
+    return sym if TICKER_RE.match(sym) else None
+
+
+def _limited(request: Request, bucket: str) -> bool:
+    return not security.limiter.allow(bucket, security.client_key(request))
+
+
+def _too_many():
+    return JSONResponse({"error": "Too many requests. Slow down a little."}, status_code=429)
+
+
 @app.get("/dashboard")
-def dashboard(request: Request, t: str | None = None):
+def dashboard(request: Request, t: str | None = None, type: str | None = None):
     user = current_user(request)
     if not user:
         return _home()
+    sid = behaviour.web_session_id(request.session)
+    track = behaviour.tracking_allowed(user, request.headers)
     wl = db.watchlist(user["id"])
-    active = t.upper() if t and t.upper() in wl else None
+    sym = clean_symbol(t)
+    active = sym if sym in wl else None
+    etype = type if type in scoring.EVENT_TYPES else None
+    if etype and track and request.session.get("last_filter") != etype:
+        behaviour.record_watchlist(sid, "web", "filter", event_type=etype)
+    request.session["last_filter"] = etype
     c = db.get()
+    type_sql, type_args = (" AND s.event_type=?", [etype]) if etype else ("", [])
     if active:
         # a single ticker tab also shows low-score (archive) signals
         signals = c.execute(
-            """SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
-               WHERE s.ticker=? AND s.status='published' ORDER BY s.created_at DESC LIMIT 100""", (active,)).fetchall()
+            f"""SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
+               WHERE s.ticker=? AND s.status='published' {type_sql} ORDER BY s.created_at DESC LIMIT 100""",
+            [active] + type_args).fetchall()
     elif wl:
         q = ",".join("?" * len(wl))
         signals = c.execute(
             f"""SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
-                WHERE s.ticker IN ({q}) AND s.status='published' AND s.tier!='archive'
-                ORDER BY s.created_at DESC LIMIT 100""", wl).fetchall()
+                WHERE s.ticker IN ({q}) AND s.status='published' AND s.tier!='archive' {type_sql}
+                ORDER BY s.created_at DESC LIMIT 100""", wl + type_args).fetchall()
     else:
         signals = []
     feedback = {r["signal_id"]: r["useful"] for r in
@@ -171,10 +214,17 @@ def dashboard(request: Request, t: str | None = None):
     names = {u["symbol"]: u["name"] for u in universe}
     return templates.TemplateResponse(request, "dashboard.html", {
         "user": user, "watchlist": wl, "active": active, "signals": signals, "feedback": feedback,
-        "universe": [u for u in universe if u["symbol"] not in wl], "names": names,
+        "universe": [u for u in universe if u["symbol"] not in wl], "names": names, "etype": etype,
         "bot_link": f"https://t.me/{config.TELEGRAM_BOT_USERNAME}?start=connect" if config.TELEGRAM_BOT_USERNAME else None,
-        "admin": is_admin(user["id"]), "dev_login": config.DEV_LOGIN,
+        "admin": is_admin(user["id"]), "dev_login": config.DEV_LOGIN, "track": track,
+        "msg": request.query_params.get("msg"),
     })
+
+
+def _dash(msg: str = "", t: str | None = None):
+    from urllib.parse import urlencode
+    q = {k: v for k, v in (("t", t), ("msg", msg)) if v}
+    return RedirectResponse("/dashboard" + (f"?{urlencode(q)}" if q else ""), status_code=303)
 
 
 @app.post("/watchlist/add")
@@ -182,8 +232,17 @@ def watchlist_add(request: Request, symbol: str = Form(...)):
     user = current_user(request)
     if not user:
         return _home()
-    db.add_to_watchlist(user["id"], symbol)
-    return RedirectResponse(f"/dashboard?t={symbol.upper()}", status_code=303)
+    if _limited(request, "watchlist"):
+        return _dash("Too many changes in a minute. Try again shortly.")
+    sym = clean_symbol(symbol)
+    if not sym:
+        return _dash("That doesn't look like a ticker symbol.")
+    added = db.add_to_watchlist(user["id"], sym)
+    if not added:
+        return _dash(f"We don't track {sym} yet. Request noted.")
+    if behaviour.tracking_allowed(user, request.headers):
+        behaviour.record_watchlist(behaviour.web_session_id(request.session), "web", "add", ticker=sym)
+    return _dash(t=sym)
 
 
 @app.post("/watchlist/remove")
@@ -191,30 +250,98 @@ def watchlist_remove(request: Request, symbol: str = Form(...)):
     user = current_user(request)
     if not user:
         return _home()
-    db.remove_from_watchlist(user["id"], symbol)
-    return RedirectResponse("/dashboard", status_code=303)
+    if _limited(request, "watchlist"):
+        return _dash("Too many changes in a minute. Try again shortly.")
+    sym = clean_symbol(symbol)
+    if sym and sym in db.watchlist(user["id"]):
+        db.remove_from_watchlist(user["id"], sym)
+        if behaviour.tracking_allowed(user, request.headers):
+            behaviour.record_watchlist(behaviour.web_session_id(request.session), "web", "remove", ticker=sym)
+    return _dash()
 
 
 @app.post("/settings")
-def settings(request: Request, alert_threshold: int = Form(...), paused: str | None = Form(None)):
+def settings(request: Request, alert_threshold: int = Form(...), paused: str | None = Form(None),
+             no_tracking: str | None = Form(None)):
     user = current_user(request)
     if not user:
         return _home()
-    db.set_user(user["id"], alert_threshold=max(1, min(alert_threshold, 20)), paused=1 if paused else 0)
-    return RedirectResponse("/dashboard", status_code=303)
+    if _limited(request, "settings"):
+        return _dash("Too many changes in a minute. Try again shortly.")
+    db.set_user(user["id"], alert_threshold=max(1, min(alert_threshold, 20)), paused=1 if paused else 0,
+                tracking_opt_out=1 if no_tracking else 0)
+    return _dash("Settings saved.")
+
+
+def _wants_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "")
 
 
 @app.post("/feedback/{signal_id}/{useful}")
 def web_feedback(request: Request, signal_id: int, useful: int):
+    """Useful (1) / Not useful (0). Tapping the active choice again clears it."""
+    user = current_user(request)
+    if not user:
+        return JSONResponse({"error": "login"}, status_code=401) if _wants_json(request) else _home()
+    if useful not in (0, 1):
+        raise HTTPException(404)
+    if _limited(request, "feedback"):
+        return _too_many() if _wants_json(request) else _dash("Too many ratings in a minute.")
+    if db.get().execute("SELECT 1 FROM signals WHERE id=? AND status='published'", (signal_id,)).fetchone() is None:
+        raise HTTPException(404)
+    state = behaviour.set_rating(user["id"], signal_id, useful)
+    if behaviour.tracking_allowed(user, request.headers):
+        action = "like_cleared" if state is None else ("like" if state == 1 else "dislike")
+        behaviour.record_rating(behaviour.web_session_id(request.session), "web", signal_id, action)
+    if _wants_json(request):
+        return {"state": state}
+    return RedirectResponse(_safe_back(request), status_code=303)
+
+
+def _safe_back(request: Request) -> str:
+    """Go back to the page the form was on, but only within this site."""
+    from urllib.parse import urlparse
+    ref = urlparse(request.headers.get("referer", ""))
+    if ref.netloc and ref.netloc != request.url.netloc:
+        return "/dashboard"
+    path = ref.path or "/dashboard"
+    return path + (f"?{ref.query}" if ref.query else "") if path.startswith("/") else "/dashboard"
+
+
+@app.post("/api/events")
+async def api_events(request: Request):
+    """Behaviour events from the dashboard (see app/static/track.js and app/behaviour.py)."""
+    user = current_user(request)
+    if not user:
+        return JSONResponse({"error": "login"}, status_code=401)
+    if int(request.headers.get("content-length") or 0) > 16_384:
+        return JSONResponse({"error": "too large"}, status_code=413)
+    if _limited(request, "events"):
+        return _too_many()
+    if not behaviour.tracking_allowed(user, request.headers):
+        return {"stored": 0, "tracking": "off"}
+    try:
+        raw = json.loads((await request.body())[:16_384] or b"{}")
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    batch = behaviour.parse_batch(raw)
+    if batch is None:
+        return JSONResponse({"error": "invalid events"}, status_code=422)
+    return {"stored": behaviour.record_browser_events(behaviour.web_session_id(request.session), batch)}
+
+
+@app.post("/comments/{signal_id}")
+def comment(request: Request, signal_id: int, text: str = Form("")):
+    """Optional free-text comment. Side input for founders only; not used by the learning loop."""
     user = current_user(request)
     if not user:
         return _home()
-    if db.get().execute("SELECT 1 FROM signals WHERE id=?", (signal_id,)).fetchone() is None:
-        raise HTTPException(404)
-    with db.tx() as c:
-        c.execute("""INSERT INTO feedback VALUES (?,?,?,?) ON CONFLICT(signal_id,user_id)
-                     DO UPDATE SET useful=excluded.useful""", (signal_id, user["id"], 1 if useful else 0, db.now()))
-    return RedirectResponse(request.headers.get("referer", "/dashboard"), status_code=303)
+    if _limited(request, "comment"):
+        return _dash("You've sent several comments already. Try again in a few minutes.")
+    if len(text) > 4 * behaviour.MAX_COMMENT:
+        return _dash("That comment is too long (500 characters at most).")
+    ok = behaviour.save_comment(behaviour.web_session_id(request.session), signal_id, text)
+    return _dash("Thanks, a founder will read it." if ok else "Write a short comment first.")
 
 
 # ---------------- admin ----------------

@@ -158,3 +158,27 @@ form.inline select { max-width: 14rem; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 blockquote.lead { margin: .35rem 0 .2rem; padding-left: .75rem; border-left: 2px solid var(--rule); color: var(--muted); font-size: .9rem; max-width: 75ch; }
 blockquote.lead cite { display: block; font-style: normal; font-size: .8rem; margin-top: .15rem; }
+
+/* behaviour UI, 1 Nov 2026 */
+.skip { position: absolute; left: -999px; top: 0; background: var(--ink); color: var(--paper); padding: .5rem 1rem; z-index: 10; }
+.skip:focus { left: 1rem; }
+.foot { max-width: 1120px; margin: 0 auto; padding: 1.5rem clamp(1rem, 4vw, 2.5rem) 2.5rem; border-top: 1px solid var(--rule);
+  display: flex; gap: 1.5rem; flex-wrap: wrap; }
+.chip { font-size: .75rem; padding: .05rem .5rem; border: 1px solid var(--rule); border-radius: 999px; white-space: nowrap; }
+.score { flex-direction: column; align-items: center; gap: .25rem; }
+.score .tier { font-size: .65rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.filters { display: flex; flex-wrap: wrap; gap: .4rem; margin: -.5rem 0 1rem; font-size: .85rem; }
+.filters a { text-decoration: none; padding: .2rem .65rem; border: 1px solid var(--rule); border-radius: 999px; color: var(--muted); }
+.filters a.on { border-color: var(--ink); color: var(--ink); font-weight: 600; }
+.rating { display: inline-flex; gap: .5rem; align-items: center; }
+.rating form { display: inline; }
+.source-link .small { font-weight: 400; }
+details.comment summary { font-size: .8rem; }
+details.comment textarea { background: var(--paper); }
+.onboard { padding-left: 1.2rem; color: var(--muted); }
+.onboard li { margin-bottom: .6rem; }
+.onboard b { color: var(--ink); }
+.privacy-note a { white-space: nowrap; }
+.prose { max-width: 70ch; }
+.prose h2 { margin-top: 2rem; }
+.prose table { margin: .5rem 0 1rem; }

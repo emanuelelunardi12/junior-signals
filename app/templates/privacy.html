@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Privacy · Junior Signals{% endblock %}
+{% block main %}
+<article class="prose">
+  <h1>Privacy and data</h1>
+  <p class="lede">Junior Signals learns which kinds of signals are worth scoring higher from how people use them. Here is
+    exactly what we record, why, and how to switch it off.</p>
+
+  <h2>What we record</h2>
+  <table class="stats">
+    <tr><th>Your account</th><td>Your Telegram id, first name and username, watchlist, alert settings, and the alerts we
+      sent you (so we never send one twice and can send a correction if we withdraw one).</td></tr>
+    <tr><th>Ratings</th><td>Your Useful / Not useful taps, so the buttons show your choice.</td></tr>
+    <tr><th>Reading behaviour</th><td>On the dashboard: which signals were on screen, which you opened and for how long,
+      which you scrolled past, and source links you clicked. In Telegram: Useful / Not useful taps. Also watchlist
+      changes and the event-type filters you use.</td></tr>
+    <tr><th>Comments</th><td>Anything you type in a signal's comment box. Founders read these; they are not used to
+      change scores and are never sent to the AI.</td></tr>
+  </table>
+
+  <h2>How reading behaviour is stored</h2>
+  <p>Under an <b>anonymous session id</b>, not your Telegram id: a random token created when you log in (or, for
+    Telegram taps, a keyed code that changes every day). The browser never chooses it. Each event stores only the
+    time, the signal, its event type and ticker, and for reading time the number of seconds.</p>
+  <p>Raw events are deleted after {{ retention_days }} days. After that we keep only totals per event type.</p>
+
+  <h2>Why</h2>
+  <p>Totals per event type (how often each kind of signal is opened, read, clicked or rated useful) let the system
+    propose changes to its scoring weights. It never applies them by itself: a founder reviews every proposed change
+    with the numbers behind it, and only approved changes take effect. Alerts themselves are published automatically;
+    your behaviour never decides whether a single alert is sent.</p>
+
+  <h2>How to opt out</h2>
+  <ul>
+    <li>Dashboard: tick <b>Don't record my reading behaviour</b> under Alerts and save.</li>
+    <li>Telegram: send <code>/tracking off</code> to the bot.</li>
+    <li>Browser: if it sends the Global Privacy Control signal, we record nothing from it.{% if gpc %} <b>Your browser is sending it now.</b>{% endif %}</li>
+    <li>Delete everything linked to you: send <code>/stop</code> to the bot.</li>
+  </ul>
+  <p class="small">Opting out stops reading-behaviour recording. Your explicit Useful / Not useful ratings still count,
+    without your identity, in per-event-type totals. Information only, not investment advice.</p>
+</article>
+{% endblock %}

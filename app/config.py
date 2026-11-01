@@ -58,6 +58,9 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "JuniorSignals student project cont
 DATABASE_PATH = ROOT / os.getenv("DATABASE_PATH", "data/signals.db")
 UNIVERSE_PATH = ROOT / "config" / "universe.yaml"
 
+# Raw behaviour events are deleted after this many days; the learning loop keeps only aggregates.
+BEHAVIOUR_RETENTION_DAYS = int(os.getenv("BEHAVIOUR_RETENTION_DAYS", "180"))
+
 # Max characters of a document sent to the models (keeps cost predictable)
 MAX_DOC_CHARS = 40_000
 

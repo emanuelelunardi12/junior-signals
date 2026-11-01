@@ -10,7 +10,7 @@ os.environ["DATABASE_PATH"] = "data/test.db"     # never touched: tests use an i
 
 import pytest
 
-from app import db
+from app import db, security
 
 
 @pytest.fixture(autouse=True)
@@ -23,5 +23,6 @@ def fresh_db(monkeypatch):
     # never call the real Telegram API in tests
     monkeypatch.setattr("app.telegram.send_message", lambda chat_id, text, buttons=None: sent.append((chat_id, text)))
     monkeypatch.setattr("app.telegram.answer_callback", lambda *a, **k: None)
+    security.limiter.reset()
     yield sent
     db.use(None)

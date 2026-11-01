@@ -16,18 +16,19 @@
   </ul>
 {%- endmacro %}
 
-{% macro card(s, names, fb=None, show_feedback=True) -%}
-<article class="signal tier-{{ s.tier }}">
-  <div class="score"><b>{{ s.score }}</b></div>
+{% macro card(s, names, fb=None, show_feedback=True, position=0) -%}
+<article class="signal tier-{{ s.tier }}" data-signal="{{ s.id }}" data-position="{{ position }}" aria-labelledby="sig-{{ s.id }}">
+  <div class="score" aria-label="Score {{ s.score }}"><b>{{ s.score }}</b><span class="tier">{{ s.tier }}</span></div>
   <div class="body">
-    <p class="meta"><a class="ticker" href="/dashboard?t={{ s.ticker }}">{{ s.ticker }}</a>
+    <p class="meta"><a class="ticker" href="/dashboard?t={{ s.ticker | urlencode }}">{{ s.ticker }}</a>
       <span>{{ names.get(s.ticker, '') }}</span>
-      <time>{{ s.created_at[:10] }}</time></p>
-    <h3>{{ s.headline }}</h3>
+      <span class="chip">{{ event_types.get(s.event_type, s.event_type) }}</span>
+      <time datetime="{{ s.created_at }}">{{ s.created_at[:10] }}</time></p>
+    <h3 id="sig-{{ s.id }}">{{ s.headline }}</h3>
     {% set f = s.fields | fromjson %}
     {% set q = lead_quote(f) %}
-    {% if q %}<blockquote class="lead">“{{ q }}”<cite>{{ source_domain(s.url) }}</cite></blockquote>{% endif %}
-    <details>
+    {% if q %}<blockquote class="lead">“{{ q }}”<cite>Verbatim from {{ source_domain(s.url) }}</cite></blockquote>{% endif %}
+    <details class="why-box">
       <summary>Why this score</summary>
       {{ strata(s.breakdown) }}
       {% if f.get('_quotes') %}
@@ -39,12 +40,25 @@
       {% endif %}
     </details>
     <div class="actions">
-      <a href="{{ s.url }}" target="_blank" rel="noopener">Read source</a>
+      <a class="source-link" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">Read source <span class="small">({{ source_domain(s.url) }})</span></a>
       {% if show_feedback %}
-      <form method="post" action="/feedback/{{ s.id }}/1"><button class="{{ 'on' if fb == 1 }}">Useful</button></form>
-      <form method="post" action="/feedback/{{ s.id }}/0"><button class="{{ 'on' if fb == 0 }}">Not useful</button></form>
+      <div class="rating" role="group" aria-label="Was this signal useful?">
+        <form method="post" action="/feedback/{{ s.id }}/1" class="rate"><button data-value="1" class="{{ 'on' if fb == 1 }}" aria-pressed="{{ 'true' if fb == 1 else 'false' }}">Useful</button></form>
+        <form method="post" action="/feedback/{{ s.id }}/0" class="rate"><button data-value="0" class="{{ 'on' if fb == 0 }}" aria-pressed="{{ 'true' if fb == 0 else 'false' }}">Not useful</button></form>
+        <span role="status" class="sr-only"></span>
+      </div>
       {% endif %}
     </div>
+    {% if show_feedback %}
+    <details class="comment">
+      <summary>Comment</summary>
+      <form method="post" action="/comments/{{ s.id }}" class="stack">
+        <label class="small" for="c-{{ s.id }}">Anything wrong or missing? Founders read every comment.</label>
+        <textarea id="c-{{ s.id }}" name="text" rows="2" maxlength="500" required></textarea>
+        <button>Send comment</button>
+      </form>
+    </details>
+    {% endif %}
   </div>
 </article>
 {%- endmacro %}

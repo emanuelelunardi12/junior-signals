@@ -9,8 +9,10 @@
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..750&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
+  {% block scripts %}{% endblock %}
 </head>
-<body>
+<body data-track="{{ 'on' if track else 'off' }}">
+  <a class="skip" href="#main">Skip to content</a>
   <header class="top">
     <a class="brand" href="/">Junior Signals</a>
     {% if user %}
@@ -21,6 +23,10 @@
     </nav>
     {% endif %}
   </header>
-  <main>{% block main %}{% endblock %}</main>
+  <main id="main">{% block main %}{% endblock %}</main>
+  <footer class="foot small">
+    <span>Information only, not investment advice.</span>
+    <a href="/privacy">Privacy and data</a>
+  </footer>
 </body>
 </html>

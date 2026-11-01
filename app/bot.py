@@ -1,5 +1,9 @@
 """Handles updates Telegram sends to our webhook: commands and button taps."""
-from app import config, db, telegram
+import re
+
+from app import behaviour, config, db, telegram
+
+SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
 
 HELP = (
     "<b>Commands</b>\n"
@@ -8,6 +12,7 @@ HELP = (
     "/list  show your watchlist\n"
     "/threshold N  only alert me for scores of N or more (default 8)\n"
     "/pause  and  /resume  stop or restart alerts\n"
+    "/privacy  what we record and how to switch it off\n"
     "/stop  delete my account and data\n\n"
     f"Dashboard: {config.BASE_URL}/dashboard"
 )
@@ -42,19 +47,31 @@ def handle_command(user: dict, chat_id: int, text: str) -> None:
         _reply(chat_id, "Send /start first to connect your account.")
         return
 
-    if cmd == "/add" and arg:
-        ok = db.add_to_watchlist(uid, arg)
-        _reply(chat_id, f"Added {arg.upper()}." if ok else
-               f"We don't track {arg.upper()} yet. Request noted; we'll tell you when it's added.")
-    elif cmd == "/remove" and arg:
-        db.remove_from_watchlist(uid, arg)
-        _reply(chat_id, f"Removed {arg.upper()}.")
+    sym = arg.upper() if SYMBOL.match(arg.upper()) else ""
+    if cmd in ("/add", "/remove") and arg and not sym:
+        _reply(chat_id, "That doesn't look like a ticker symbol, e.g. /add EXMP.V")
+    elif cmd == "/add" and sym:
+        ok = db.add_to_watchlist(uid, sym)
+        _reply(chat_id, f"Added {sym}." if ok else
+               f"We don't track {sym} yet. Request noted; we'll tell you when it's added.")
+        if ok:
+            _track_watchlist(uid, "add", sym)
+    elif cmd == "/remove" and sym:
+        db.remove_from_watchlist(uid, sym)
+        _reply(chat_id, f"Removed {sym}.")
+        _track_watchlist(uid, "remove", sym)
     elif cmd == "/list":
         wl = db.watchlist(uid)
         _reply(chat_id, "Your watchlist: " + ", ".join(wl) if wl else "Your watchlist is empty. Use /add TICKER.")
     elif cmd == "/threshold" and arg.isdigit():
-        db.set_user(uid, alert_threshold=int(arg))
-        _reply(chat_id, f"You'll get alerts for scores of {int(arg)} or more.")
+        n = max(1, min(int(arg), 20))
+        db.set_user(uid, alert_threshold=n)
+        _reply(chat_id, f"You'll get alerts for scores of {n} or more.")
+    elif cmd == "/privacy":
+        _reply(chat_id, PRIVACY)
+    elif cmd == "/tracking" and arg.lower() in ("on", "off"):
+        db.set_user(uid, tracking_opt_out=1 if arg.lower() == "off" else 0)
+        _reply(chat_id, "Behaviour recording is off for you." if arg.lower() == "off" else "Behaviour recording is on.")
     elif cmd == "/pause":
         db.set_user(uid, paused=1)
         _reply(chat_id, "Alerts paused. Send /resume to restart.")
@@ -62,31 +79,49 @@ def handle_command(user: dict, chat_id: int, text: str) -> None:
         db.set_user(uid, paused=0)
         _reply(chat_id, "Alerts resumed.")
     elif cmd == "/stop":
+        behaviour.forget_telegram_user(uid)
         db.delete_user(uid)
         _reply(chat_id, "Your account and data are deleted. Send /start any time to come back.")
     else:
         _reply(chat_id, HELP)
 
 
+PRIVACY = (
+    "<b>What we record</b>\n"
+    "Your watchlist and alert settings, the alerts we send you, and your Useful / Not useful taps.\n"
+    "On the dashboard we also record reading behaviour (which signals you open, for how long, and source clicks) "
+    "under an anonymous session id, never your Telegram id, to learn which kinds of signals are worth scoring higher. "
+    "A founder approves every change that learning proposes.\n\n"
+    "/tracking off  stop recording reading behaviour\n/stop  delete your account and data\n"
+    f"Details: {config.BASE_URL}/privacy"
+)
+
+
+def _track_watchlist(uid: int, action: str, symbol: str) -> None:
+    if behaviour.tracking_allowed(db.get_user(uid)):
+        behaviour.record_watchlist(behaviour.telegram_session_id(uid), "telegram", action, ticker=symbol)
+
+
 def handle_callback(cq: dict) -> None:
-    data = cq.get("data", "")
-    uid = cq["from"]["id"]
-    if data.startswith("fb:"):
-        _, signal_id, useful = data.split(":")
-        if db.get().execute("SELECT 1 FROM signals WHERE id=?", (int(signal_id),)).fetchone() is None:
-            return
-        if db.get_user(uid) is None:
-            return
-        with db.tx() as c:
-            c.execute(
-                """INSERT INTO feedback (signal_id, user_id, useful, created_at) VALUES (?,?,?,?)
-                   ON CONFLICT(signal_id, user_id) DO UPDATE SET useful=excluded.useful, created_at=excluded.created_at""",
-                (int(signal_id), uid, int(useful), db.now()),
-            )
-        try:
-            telegram.answer_callback(cq["id"], "Thanks, noted.")
-        except telegram.TelegramError:
-            pass
+    data = str(cq.get("data", ""))
+    uid = (cq.get("from") or {}).get("id")
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "fb" or not parts[1].isdigit() or parts[2] not in ("0", "1") or not uid:
+        return  # malformed or foreign callback data: ignore quietly
+    signal_id, useful = int(parts[1]), int(parts[2])
+    if db.get().execute("SELECT 1 FROM signals WHERE id=? AND status='published'", (signal_id,)).fetchone() is None:
+        return
+    user = db.get_user(uid)
+    if user is None:
+        return
+    state = behaviour.set_rating(uid, signal_id, useful, toggle=False)  # Telegram buttons show no state
+    if behaviour.tracking_allowed(user):
+        behaviour.record_rating(behaviour.telegram_session_id(uid), "telegram", signal_id,
+                                "like" if state == 1 else "dislike")
+    try:
+        telegram.answer_callback(cq["id"], "Thanks, noted.")
+    except (telegram.TelegramError, KeyError):
+        pass
 
 
 def handle_update(update: dict) -> None:
