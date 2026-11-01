@@ -59,6 +59,12 @@ def run_insights_job() -> None:
         raise
 
 
+def run_listings_job() -> None:
+    """Weekly refresh of NASDAQ/NYSE listings from the SEC. TSX/TSXV lists are loaded by hand (TMX terms)."""
+    from app import listings
+    listings.fetch_sec()
+
+
 def start() -> BackgroundScheduler | None:
     if not config.RUN_SCHEDULER:
         return None
@@ -67,6 +73,7 @@ def start() -> BackgroundScheduler | None:
     s.add_job(run_digest_job, CronTrigger(day_of_week=config.DIGEST_DAY, hour=config.DIGEST_HOUR), id="digest")
     s.add_job(run_learning_job, IntervalTrigger(hours=config.LEARNING_INTERVAL_HOURS), id="learning")
     s.add_job(run_insights_job, IntervalTrigger(hours=config.INSIGHTS_INTERVAL_HOURS), id="insights")
+    s.add_job(run_listings_job, CronTrigger(day_of_week=6, hour=3), id="listings")
     s.start()
     print(f"[scheduler] pipeline every {config.PIPELINE_INTERVAL_HOURS}h, learning every "
           f"{config.LEARNING_INTERVAL_HOURS}h, AI insights every {config.INSIGHTS_INTERVAL_HOURS}h, digest weekly")

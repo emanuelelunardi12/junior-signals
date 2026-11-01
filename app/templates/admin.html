@@ -159,6 +159,27 @@
 </section>
 
 <section class="panel">
+  <h2>Ticker universe</h2>
+  <p class="small">Selectable is not the same as covered. US names come from the SEC list with a CIK, so EDGAR filings
+    (13D/13G, 8-K, 6-K) are collected once someone watches them. TSX/TSXV names are covered only where a newswire feed is
+    configured in <code>universe.yaml</code>; SEDAR+ is never scraped.</p>
+  <table class="stats">
+    <thead><tr><th scope="col">Exchange</th><th scope="col">Selectable</th><th scope="col">With SEC CIK</th><th scope="col">Newswire feeds</th></tr></thead>
+    {% for l in listings %}<tr><th scope="row">{{ l.exchange }}</th><td>{{ l.selectable }}</td><td>{{ l.edgar_capable }}</td><td>{{ l.newswire_feeds }}</td></tr>{% endfor %}
+  </table>
+  <form method="post" action="/admin/listings" enctype="multipart/form-data" class="row" style="margin-top:1rem">
+    <input type="hidden" name="source" value="tmx">
+    <label class="small">Exchange<select name="exchange"><option value="TSXV">TSX Venture</option><option value="TSX">TSX</option></select></label>
+    <label class="small grow">TMX issuer list saved as CSV (downloaded by hand; TMX terms forbid automated download)<input type="file" name="file" accept=".csv,text/csv" required></label>
+    <button>Load list</button>
+  </form>
+  <form method="post" action="/admin/listings" class="inline-form" style="margin-top:.5rem">
+    <input type="hidden" name="source" value="sec"><button>Refresh NASDAQ/NYSE from the SEC now</button>
+    <span class="small">Also refreshed weekly by the scheduler.</span>
+  </form>
+</section>
+
+<section class="panel">
   <h2>Pipeline</h2>
   <table class="stats">
     <tr><th>Documents</th><td>{% for d in stats.docs %}{{ d.status }} {{ d.n }}{{ ', ' if not loop.last }}{% else %}none yet{% endfor %}</td></tr>

@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import behaviour, bot, config, db, publish, scoring, security, telegram
+from app import behaviour, bot, config, db, listings, publish, scoring, security, telegram
 
 HERE = Path(__file__).parent
 
@@ -19,6 +19,10 @@ async def lifespan(_app):
     print(config.describe())
     db.get()
     db.sync_universe()
+    if config.LISTINGS_AUTOLOAD and not db.get().execute("SELECT 1 FROM listings WHERE source='sec' LIMIT 1").fetchone():
+        import threading
+        from app import listings
+        threading.Thread(target=listings.fetch_sec, name="sec-listings", daemon=True).start()
     sched = None
     if config.RUN_SCHEDULER:
         from app import scheduler
@@ -186,7 +190,7 @@ def _too_many():
 
 
 @app.get("/dashboard")
-def dashboard(request: Request, t: str | None = None, type: str | None = None):
+def dashboard(request: Request, t: str | None = None, type: str | None = None, q: str | None = None):
     user = current_user(request)
     if not user:
         return _home()
@@ -217,11 +221,16 @@ def dashboard(request: Request, t: str | None = None, type: str | None = None):
         signals = []
     feedback = {r["signal_id"]: r["useful"] for r in
                 c.execute("SELECT signal_id, useful FROM feedback WHERE user_id=?", (user["id"],))}
-    universe = c.execute("SELECT symbol, name, exchange FROM tickers ORDER BY symbol").fetchall()
-    names = {u["symbol"]: u["name"] for u in universe}
+    names = {r["symbol"]: r["name"] for r in c.execute("SELECT symbol, name FROM tickers")}
+    query = (q or "").strip()[:40]
+    results = [] if not query or _limited(request, "search") else \
+        [r for r in listings.search(query) if r["symbol"] not in wl]
+    curated = [dict(r, coverage=listings.coverage(r["symbol"])) for r in c.execute(
+        "SELECT symbol, name, exchange FROM tickers WHERE configured=1 ORDER BY symbol LIMIT 12") if r["symbol"] not in wl]
     return templates.TemplateResponse(request, "dashboard.html", {
         "user": user, "watchlist": wl, "active": active, "signals": signals, "feedback": feedback,
-        "universe": [u for u in universe if u["symbol"] not in wl], "names": names, "etype": etype,
+        "results": results, "q": query, "curated": curated, "names": names, "etype": etype,
+        "coverage": listings.coverage(active) if active else None,
         "bot_link": f"https://t.me/{config.TELEGRAM_BOT_USERNAME}?start=connect" if config.TELEGRAM_BOT_USERNAME else None,
         "admin": is_admin(user["id"]), "dev_login": config.DEV_LOGIN, "track": track,
         "msg": request.query_params.get("msg"),
@@ -246,9 +255,13 @@ def watchlist_add(request: Request, symbol: str = Form(...)):
         return _dash("That doesn't look like a ticker symbol.")
     added = db.add_to_watchlist(user["id"], sym)
     if not added:
-        return _dash(f"We don't track {sym} yet. Request noted.")
+        return _dash(f"{sym} is not on TSX, TSX Venture, NASDAQ or NYSE in our list. Request noted.")
     if behaviour.tracking_allowed(user, request.headers):
         behaviour.record_watchlist(behaviour.web_session_id(request.session), "web", "add", ticker=sym)
+    cov = listings.coverage(sym)
+    if cov == "not covered yet":
+        return _dash(f"Added {sym}. We don't collect its news automatically yet, so only signals we add by hand "
+                     "will appear. Request noted.", t=sym)
     return _dash(t=sym)
 
 
@@ -337,6 +350,16 @@ async def api_events(request: Request):
     return {"stored": behaviour.record_browser_events(behaviour.web_session_id(request.session), batch)}
 
 
+@app.get("/api/tickers")
+def api_tickers(request: Request, q: str = ""):
+    """Ticker search for the watchlist box: symbol prefix first, then company name."""
+    if not current_user(request):
+        return JSONResponse({"error": "login"}, status_code=401)
+    if _limited(request, "search"):
+        return _too_many()
+    return {"results": [{k: r[k] for k in ("symbol", "exchange", "name", "coverage")} for r in listings.search(q)]}
+
+
 @app.post("/comments/{signal_id}")
 def comment(request: Request, signal_id: int, text: str = Form("")):
     """Optional free-text comment. Side input for founders only; not used by the learning loop."""
@@ -402,7 +425,7 @@ def admin(request: Request):
     # Documents the classifier called noise. Checking a sample catches missed events, which no other check does.
     noise = c.execute("""SELECT * FROM documents WHERE status='noise' ORDER BY id DESC LIMIT 15""").fetchall()
     return templates.TemplateResponse(request, "admin.html", {
-        "user": user, "admin": True, "drafts": drafts, "reach": reach, "live": live, "withheld": withheld,
+        "listings": listings.summary(), "user": user, "admin": True, "drafts": drafts, "reach": reach, "live": live, "withheld": withheld,
         "stats": stats, "announcements": announcements, "noise": noise, "msg": request.query_params.get("msg"),
         "universe": c.execute("SELECT symbol, name FROM tickers ORDER BY symbol").fetchall(),
         "event_types": scoring.EVENT_TYPES,
@@ -640,6 +663,30 @@ def admin_insight_propose(request: Request, insight_id: int, index: int):
         return _tuning_back("Could not create a proposal (already open, out of range, or a 'review' suggestion).",
                             "/admin/insights")
     return _tuning_back("Proposal created from the AI suggestion. Approve or reject it here.")
+
+
+@app.post("/admin/listings")
+async def admin_listings(request: Request):
+    """Load a TSX/TSXV issuer list a founder downloaded by hand (TMX terms forbid automated download),
+    or refresh the SEC list now."""
+    _admin_or_403(request)
+    form = await request.form()
+    source = str(form.get("source", ""))
+    if source == "sec":
+        n = listings.fetch_sec()
+        return _back(f"Loaded {n} NASDAQ/NYSE listings from the SEC." if n else "SEC download failed; see the server log.")
+    exchange = str(form.get("exchange", "")).upper()
+    upload = form.get("file")
+    if exchange not in ("TSX", "TSXV") or upload is None or not hasattr(upload, "read"):
+        return _back("Choose TSX or TSX Venture and a CSV file.")
+    raw = await upload.read(5_000_001)
+    if len(raw) > 5_000_000:
+        return _back("That file is over 5 MB.")
+    try:
+        n = listings.load_tmx_csv(raw.decode("utf-8-sig", errors="replace"), exchange)
+    except ValueError as exc:
+        return _back(f"Could not read the file: {exc}")
+    return _back(f"Loaded {n} {exchange} listings.")
 
 
 @app.post("/admin/announce")

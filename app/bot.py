@@ -52,8 +52,14 @@ def handle_command(user: dict, chat_id: int, text: str) -> None:
         _reply(chat_id, "That doesn't look like a ticker symbol, e.g. /add EXMP.V")
     elif cmd == "/add" and sym:
         ok = db.add_to_watchlist(uid, sym)
-        _reply(chat_id, f"Added {sym}." if ok else
-               f"We don't track {sym} yet. Request noted; we'll tell you when it's added.")
+        from app import listings
+        if ok and listings.coverage(sym) == "not covered yet":
+            _reply(chat_id, f"Added {sym}. We don't collect its news automatically yet, so only signals we add "
+                            "by hand will appear. Request noted.")
+        else:
+            _reply(chat_id, f"Added {sym}." if ok else
+                   f"{sym} isn't in our TSX, TSX Venture, NASDAQ or NYSE list. Request noted. "
+                   "Canadian names need a suffix: .TO for TSX, .V for TSX Venture.")
         if ok:
             _track_watchlist(uid, "add", sym)
     elif cmd == "/remove" and sym:

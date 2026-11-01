@@ -6,6 +6,7 @@ os.environ["BASE_URL"] = "http://testserver"     # https_only cookies would brea
 os.environ["DEV_LOGIN"] = "1"
 os.environ["RUN_SCHEDULER"] = "0"
 os.environ["PRICE_SOURCE"] = "none"
+os.environ["LISTINGS_AUTOLOAD"] = "0"            # never download the SEC listing file in tests
 os.environ["DATABASE_PATH"] = "data/test.db"     # never touched: tests use an in-memory database
 
 import pytest

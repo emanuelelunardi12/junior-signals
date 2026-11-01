@@ -61,6 +61,9 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "JuniorSignals student project cont
 DATABASE_PATH = ROOT / os.getenv("DATABASE_PATH", "data/signals.db")
 UNIVERSE_PATH = ROOT / "config" / "universe.yaml"
 
+# Download the SEC's NASDAQ/NYSE listing file at startup when we have none yet (needs outbound HTTPS to sec.gov).
+LISTINGS_AUTOLOAD = os.getenv("LISTINGS_AUTOLOAD", "1") == "1"
+
 # Raw behaviour events are deleted after this many days; the learning loop keeps only aggregates.
 BEHAVIOUR_RETENTION_DAYS = int(os.getenv("BEHAVIOUR_RETENTION_DAYS", "180"))
 

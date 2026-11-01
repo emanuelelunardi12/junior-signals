@@ -75,6 +75,7 @@ def collect_edgar(ticker_row, max_filings: int = 20) -> int:
     if not cik:
         return 0
     cik10 = str(cik).zfill(10)
+    time.sleep(0.15)  # stay well under the SEC's 10 requests/second when many tickers are watched
     r = httpx.get(f"https://data.sec.gov/submissions/CIK{cik10}.json", headers=HTTP_HEADERS, timeout=30)
     r.raise_for_status()
     recent = r.json().get("filings", {}).get("recent", {})
@@ -97,9 +98,17 @@ def collect_edgar(ticker_row, max_filings: int = 20) -> int:
     return new
 
 
+def tickers_to_collect():
+    """Configured tickers plus any listing someone watches. Thousands of listings are selectable; we only spend
+    requests on the ones that matter to a user."""
+    return db.get().execute(
+        """SELECT * FROM tickers t WHERE t.configured=1 OR EXISTS (SELECT 1 FROM watchlist w WHERE w.symbol=t.symbol)
+           ORDER BY t.symbol""").fetchall()
+
+
 def collect_all() -> int:
     total = 0
-    for t in db.get().execute("SELECT * FROM tickers ORDER BY symbol").fetchall():
+    for t in tickers_to_collect():
         for fn in (collect_rss, collect_edgar):
             try:
                 total += fn(t)

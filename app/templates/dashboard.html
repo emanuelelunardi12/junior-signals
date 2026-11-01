@@ -19,7 +19,8 @@
   <section class="feed" aria-label="Signals">
     {% if active %}
       <div class="tickerhead">
-        <h1>{{ active }} <span>{{ names.get(active, '') }}</span></h1>
+        <div><h1>{{ active }} <span>{{ names.get(active, '') }}</span></h1>
+          <p class="small">Coverage: <span class="cov cov-{{ 'no' if coverage == 'not covered yet' else 'yes' }}">{{ coverage }}</span>{% if coverage == 'not covered yet' %}. Only signals we add by hand will appear for now.{% endif %}</p></div>
         <form method="post" action="/watchlist/remove"><input type="hidden" name="symbol" value="{{ active }}">
           <button class="quiet">Remove from watchlist</button></form>
       </div>
@@ -59,15 +60,34 @@
   </section>
 
   <aside>
-    <h2>Add a ticker</h2>
-    {% if universe %}
-    <form method="post" action="/watchlist/add" class="stack">
-      <select name="symbol" aria-label="Ticker">
-        {% for u in universe %}<option value="{{ u.symbol }}">{{ u.symbol }}  {{ u.name }}</option>{% endfor %}
-      </select>
-      <button>Add to watchlist</button>
+    <h2 id="add-h">Add a ticker</h2>
+    <form method="get" action="/dashboard" class="search" role="search" aria-labelledby="add-h">
+      <label for="q" class="small">TSX, TSX Venture, NASDAQ and NYSE. Symbol or company name.</label>
+      <div class="searchrow">
+        <input id="q" name="q" value="{{ q }}" maxlength="40" autocomplete="off" spellcheck="false"
+               placeholder="e.g. ABX.TO or copper" aria-controls="ticker-results">
+        {% if active %}<input type="hidden" name="t" value="{{ active }}">{% endif %}
+        <button>Search</button>
+      </div>
     </form>
-    {% else %}<p class="small">You follow every ticker we track.</p>{% endif %}
+    <ul class="results" id="ticker-results" aria-live="polite">
+      {% for r in results %}
+      <li><form method="post" action="/watchlist/add"><input type="hidden" name="symbol" value="{{ r.symbol }}">
+        <button aria-label="Add {{ r.symbol }}">Add</button></form>
+        <span><b>{{ r.symbol }}</b> {{ r.name }}<br><span class="small">{{ r.exchange }} · <span class="cov cov-{{ 'no' if r.coverage == 'not covered yet' else 'yes' }}">{{ r.coverage }}</span></span></span></li>
+      {% endfor %}
+    </ul>
+    {% if q and not results %}<p class="small">No listing matches “{{ q }}”. Canadian names need a suffix: .TO (TSX) or .V (TSX Venture).</p>{% endif %}
+    {% if not q and curated %}
+      <p class="small">Names we cover with newswire feeds:</p>
+      <ul class="results">
+        {% for r in curated %}
+        <li><form method="post" action="/watchlist/add"><input type="hidden" name="symbol" value="{{ r.symbol }}">
+          <button aria-label="Add {{ r.symbol }}">Add</button></form>
+          <span><b>{{ r.symbol }}</b> {{ r.name }}<br><span class="small">{{ r.exchange }} · {{ r.coverage }}</span></span></li>
+        {% endfor %}
+      </ul>
+    {% endif %}
 
     <h2>Alerts</h2>
     <form method="post" action="/settings" class="stack">

@@ -28,8 +28,21 @@ CREATE TABLE IF NOT EXISTS tickers (
     market_cap_musd REAL,
     rss             TEXT NOT NULL DEFAULT '[]',   -- JSON list
     match           TEXT NOT NULL DEFAULT '[]',   -- JSON list
-    price_symbol    TEXT                          -- symbol used by the price source (see app/prices.py)
+    price_symbol    TEXT,                         -- symbol used by the price source (see app/prices.py)
+    configured      INTEGER NOT NULL DEFAULT 0    -- 1 = from universe.yaml; 0 = added because a user watches it
 );
+-- Every listing a user can search and add (app/listings.py). Being listed is not the same as being covered.
+CREATE TABLE IF NOT EXISTS listings (
+    symbol     TEXT PRIMARY KEY,                  -- canonical: ABX.TO (TSX), EXMP.V (TSXV), AAPL (US)
+    exchange   TEXT NOT NULL,                     -- TSX | TSXV | NASDAQ | NYSE (others only via universe.yaml)
+    name       TEXT NOT NULL,
+    cik        TEXT,                              -- SEC Central Index Key: enables EDGAR coverage
+    sector     TEXT,
+    status     TEXT NOT NULL DEFAULT 'active',    -- active | inactive (dropped from the latest source file)
+    source     TEXT NOT NULL,                     -- sec | tmx_manual | universe_yaml
+    loaded_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_listings_name ON listings(name);
 CREATE TABLE IF NOT EXISTS watchlist (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     symbol  TEXT NOT NULL REFERENCES tickers(symbol),
@@ -251,6 +264,7 @@ MIGRATIONS = [
     ("users", "tracking_opt_out", "INTEGER NOT NULL DEFAULT 0"),
     ("signals", "rule_keys", "TEXT NOT NULL DEFAULT '[]'"),
     ("signals", "weights_version", "INTEGER NOT NULL DEFAULT 0"),
+    ("tickers", "configured", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Data changes for older databases. Each statement is idempotent.
@@ -280,15 +294,17 @@ def sync_universe(path=None) -> int:
     with tx() as c:
         for t in rows:
             c.execute(
-                """INSERT INTO tickers (symbol, name, exchange, commodity, cik, market_cap_musd, rss, match, price_symbol)
-                   VALUES (?,?,?,?,?,?,?,?,?)
+                """INSERT INTO tickers (symbol, name, exchange, commodity, cik, market_cap_musd, rss, match, price_symbol,
+                   configured) VALUES (?,?,?,?,?,?,?,?,?,1)
                    ON CONFLICT(symbol) DO UPDATE SET name=excluded.name, exchange=excluded.exchange,
                    commodity=excluded.commodity, cik=excluded.cik, market_cap_musd=excluded.market_cap_musd,
-                   rss=excluded.rss, match=excluded.match, price_symbol=excluded.price_symbol""",
+                   rss=excluded.rss, match=excluded.match, price_symbol=excluded.price_symbol, configured=1""",
                 (t["symbol"].upper(), t["name"], t.get("exchange"), t.get("commodity"),
                  str(t["cik"]) if t.get("cik") else None, t.get("market_cap_musd"),
                  json.dumps(t.get("rss") or []), json.dumps(t.get("match") or []), t.get("price_symbol")),
             )
+    from app import listings
+    listings.sync_from_universe()
     return len(rows)
 
 
@@ -326,17 +342,25 @@ def delete_user(user_id: int) -> None:
 
 
 def ticker_exists(symbol: str) -> bool:
-    return get().execute("SELECT 1 FROM tickers WHERE symbol=?", (symbol.upper(),)).fetchone() is not None
+    """True if the symbol is a ticker we know, either configured or any active listing (created on demand)."""
+    from app import listings
+    return listings.ensure_ticker(symbol)
 
 
 def add_to_watchlist(user_id: int, symbol: str) -> bool:
-    """Returns True if added; False if the ticker is not tracked (then it is logged as a request)."""
+    """Returns True if added; False if the symbol is not a known listing (then it is logged as a request).
+    A listing with no automatic coverage yet can be added; it is also logged as a request, so founders see
+    which names need a newswire feed."""
+    from app import listings
     symbol = symbol.upper()
-    with tx() as c:
-        if not c.execute("SELECT 1 FROM tickers WHERE symbol=?", (symbol,)).fetchone():
+    if not listings.ensure_ticker(symbol):
+        with tx() as c:
             c.execute("INSERT INTO ticker_requests VALUES (?,?,?)", (user_id, symbol, now()))
-            return False
+        return False
+    with tx() as c:
         c.execute("INSERT OR IGNORE INTO watchlist VALUES (?,?)", (user_id, symbol))
+        if listings.coverage(symbol) == "not covered yet":
+            c.execute("INSERT INTO ticker_requests VALUES (?,?,?)", (user_id, symbol, now()))
     return True
 
 

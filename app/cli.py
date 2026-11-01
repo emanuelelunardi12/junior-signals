@@ -66,6 +66,22 @@ def cmd_insights(a):
     print(f"Insight run {row}: {r['status']} {r['note'] or ''}".strip())
 
 
+def cmd_load_listings(a):
+    """NASDAQ/NYSE from the SEC (download or a saved copy); TSX/TSXV from a CSV a founder saved by hand."""
+    from app import listings
+    db.get()
+    if a.source == "sec":
+        n = listings.load_sec(json.loads(Path(a.file).read_text(encoding="utf-8"))) if a.file else listings.fetch_sec()
+    else:
+        if not a.file or a.exchange not in ("TSX", "TSXV"):
+            raise SystemExit("--source tmx needs --exchange TSX|TSXV and --file path.csv")
+        n = listings.load_tmx_csv(Path(a.file).read_text(encoding="utf-8-sig"), a.exchange)
+    print(f"Loaded {n} listings.")
+    for row in listings.summary():
+        print(f"  {row['exchange']:7} selectable {row['selectable']:6}  EDGAR-capable {row['edgar_capable']:6}  "
+              f"newswire feeds {row['newswire_feeds']}")
+
+
 def cmd_seed_demo(_):
     """Fake signals so the dashboard can be viewed without API keys. Never run against real data."""
     from app import demo
@@ -93,6 +109,8 @@ def main():
     e = sub.add_parser("evaluate"); e.add_argument("--docs", default="eval_data/docs")
     e.add_argument("--key", default="eval_data/answer_key.csv"); e.set_defaults(fn=cmd_evaluate)
     sub.add_parser("seed-demo").set_defaults(fn=cmd_seed_demo)
+    ll = sub.add_parser("load-listings"); ll.add_argument("--source", choices=["sec", "tmx"], required=True)
+    ll.add_argument("--exchange", type=str.upper); ll.add_argument("--file"); ll.set_defaults(fn=cmd_load_listings)
     ln = sub.add_parser("learn"); ln.add_argument("--days", type=int, default=30); ln.set_defaults(fn=cmd_learn)
     ins = sub.add_parser("insights"); ins.add_argument("--days", type=int, default=30); ins.set_defaults(fn=cmd_insights)
     a = p.parse_args()
