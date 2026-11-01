@@ -141,3 +141,20 @@ textarea { font: inherit; color: var(--ink); background: var(--paper); border: 1
 .panel { margin-top: 2.5rem; }
 form.inline { display: inline-flex; gap: .4rem; margin-left: .5rem; }
 form.inline select { max-width: 14rem; }
+
+/* admin, 1 Nov 2026 */
+.subnav { display: flex; gap: 1.25rem; font-size: .95rem; margin: .25rem 0 1rem; flex-wrap: wrap; }
+.subnav a { text-decoration: none; color: var(--muted); padding-bottom: .2rem; border-bottom: 2px solid transparent; }
+.subnav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); }
+.lede.small { font-size: .9rem; max-width: 72ch; margin: 0 0 1rem; }
+.panel.first { margin-top: 1.5rem; }
+.count { font-weight: 400; color: var(--muted); font-size: .85rem; margin-left: .4rem; }
+.tablewrap { overflow-x: auto; }
+.stats thead th { font-size: .8rem; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--rule); }
+.stats.live td { padding-right: .75rem; vertical-align: top; }
+.stats td.num { font-stretch: var(--narrow); font-weight: 700; font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.retract summary { margin-top: 0; }
+.retract form { margin-top: .5rem; min-width: 14rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+blockquote.lead { margin: .35rem 0 .2rem; padding-left: .75rem; border-left: 2px solid var(--rule); color: var(--muted); font-size: .9rem; max-width: 75ch; }
+blockquote.lead cite { display: block; font-style: normal; font-size: .8rem; margin-top: .15rem; }

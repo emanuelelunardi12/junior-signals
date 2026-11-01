@@ -24,10 +24,12 @@
       <span>{{ names.get(s.ticker, '') }}</span>
       <time>{{ s.created_at[:10] }}</time></p>
     <h3>{{ s.headline }}</h3>
+    {% set f = s.fields | fromjson %}
+    {% set q = lead_quote(f) %}
+    {% if q %}<blockquote class="lead">“{{ q }}”<cite>{{ source_domain(s.url) }}</cite></blockquote>{% endif %}
     <details>
       <summary>Why this score</summary>
       {{ strata(s.breakdown) }}
-      {% set f = s.fields | fromjson %}
       {% if f.get('_quotes') %}
       <dl class="quotes">
         {% for k, q in f['_quotes'].items() if k != 'headline' %}

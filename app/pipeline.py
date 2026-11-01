@@ -1,8 +1,13 @@
-"""collect -> classify -> extract (Maker) -> grade (Grader) -> score -> review / publish."""
+"""collect -> classify -> extract (Maker) -> grade (Grader) -> score -> publish. Fully automatic.
+
+No step in this file waits for a person. A scored signal goes straight to publish.go_live, which applies
+the red-line checks and delivers it. People only appear in two places, both outside this path: signals a
+founder writes by hand start as drafts, and changes to the scoring weights need a founder's approval.
+"""
 import json
 from datetime import datetime, timedelta, timezone
 
-from app import ai, collectors, db, prices, publish, scoring
+from app import ai, collectors, db, guardrails, prices, publish, scoring
 
 # Approximate FX to convert deal sizes for the market-cap rule. Update occasionally; precision is not critical.
 APPROX_FX_TO_USD = {"USD": 1.0, "CAD": 0.72, "AUD": 0.65, "GBP": 1.3, "EUR": 1.1}
@@ -52,8 +57,8 @@ def build_context(ticker: str, f: dict) -> scoring.Context:
     c = db.get()
     t = c.execute("SELECT market_cap_musd FROM tickers WHERE symbol=?", (ticker,)).fetchone()
     recent = c.execute(
-        """SELECT COUNT(*) AS n FROM signals WHERE ticker=? AND status!='rejected' AND tier!='archive'
-           AND created_at >= ?""",
+        """SELECT COUNT(*) AS n FROM signals WHERE ticker=? AND status IN ('published','queued')
+           AND tier!='archive' AND created_at >= ?""",
         (ticker, _since(scoring.THRESHOLDS["cluster_days"])),
     ).fetchone()["n"]
     first_time = False
@@ -77,13 +82,14 @@ def is_duplicate(key: str, days: int = 30) -> bool:
                             (key, _since(days))).fetchone() is not None
 
 
-def process_document(doc, event_type: str | None = None, force_review: bool = False,
-                     skip_dedupe: bool = False, deliver: bool = True, created_at: str | None = None) -> int | None:
+def process_document(doc, event_type: str | None = None, draft: bool = False, skip_dedupe: bool = False,
+                     deliver: bool = True, created_at: str | None = None) -> int | None:
     """Returns the new signal id, or None if the document was noise/duplicate.
 
-    event_type: set by a reviewer to skip AI classification.
-    force_review: put the signal in the review queue whatever its tier (used for signals created in /admin).
-    deliver: set False for back-testing, so nothing is sent to users.
+    Pipeline documents are published automatically the moment they are scored (no review queue).
+    event_type: set by a founder to skip AI classification.
+    draft: the signal was created by hand in /admin; it waits for its author to choose how to send it.
+    deliver: set False for back-testing (retro mode), so nothing goes live and nothing is sent.
     created_at: override the timestamp, so historical documents are scored and stored with their own date.
     """
     text, title = doc["text"] or "", doc["title"] or ""
@@ -103,10 +109,15 @@ def process_document(doc, event_type: str | None = None, force_review: bool = Fa
         return None
 
     result = scoring.score_signal(event_type, f, build_context(doc["ticker"], f))
-    status = "pending_review" if (result.tier == "alert" or force_review) else "approved"
     headline = f.get("headline") or title or scoring.EVENT_TYPES[event_type]
+    phrase = guardrails.advice_phrase(headline)
+    if phrase:  # red line: our words never read as advice. Replace the headline, keep the signal moving.
+        rejected.append({"field": "headline", "value": headline,
+                         "reason": f"Replaced automatically: reads as investment advice (\"{phrase}\")"})
+        headline = guardrails.neutral_headline(doc["ticker"], event_type, f)
     fields_json = {it["field"]: it["value"] for it in kept}
     fields_json["_quotes"] = {it["field"]: it["quote"] for it in kept}
+    status = "draft" if draft else ("queued" if deliver else "retro")
     with db.tx() as c:
         cur = c.execute(
             """INSERT INTO signals (document_id, ticker, event_type, headline, fields, rejected, score, breakdown,
@@ -116,25 +127,38 @@ def process_document(doc, event_type: str | None = None, force_review: bool = Fa
         )
         c.execute("UPDATE documents SET event_type=?, status='extracted' WHERE id=?", (event_type, doc["id"]))
         signal_id = cur.lastrowid
-    if status == "approved" and deliver:
-        publish.publish_signal(signal_id)
+    if status == "queued":
+        publish.go_live(signal_id)  # automatic: no human approval before an alert is published
     return signal_id
+
+
+def publish_queued() -> int:
+    """Recovery: publish signals left 'queued' by a crash between scoring and publishing."""
+    ids = [r["id"] for r in db.get().execute("SELECT id FROM signals WHERE status='queued' ORDER BY id")]
+    for sid in ids:
+        publish.go_live(sid)
+    return len(ids)
 
 
 def run(collect: bool = True) -> dict:
     db.sync_universe()
+    publish_queued()
     new_docs = collectors.collect_all() if collect else 0
     docs = db.get().execute("SELECT * FROM documents WHERE status='new' ORDER BY id").fetchall()
-    made, failed = 0, 0
+    made, failed, ids = 0, 0, []
     for d in docs:
         try:
-            if process_document(d):
+            sid = process_document(d)
+            if sid:
                 made += 1
+                ids.append(sid)
         except Exception as exc:
             failed += 1
             print(f"[pipeline] document {d['id']} failed: {exc}")
             with db.tx() as c:
                 c.execute("UPDATE documents SET status='failed' WHERE id=?", (d["id"],))
-    summary = {"new_documents": new_docs, "processed": len(docs), "signals": made, "failed": failed}
+    statuses = [db.get().execute("SELECT status FROM signals WHERE id=?", (i,)).fetchone()["status"] for i in ids]
+    summary = {"new_documents": new_docs, "processed": len(docs), "signals": made,
+               "published": statuses.count("published"), "withheld": statuses.count("withheld"), "failed": failed}
     print(summary)
     return summary

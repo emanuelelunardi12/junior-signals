@@ -4,6 +4,7 @@ import hmac
 import html
 import json
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -69,16 +70,30 @@ def verify_login(params: dict, max_age_seconds: int = 86400) -> dict | None:
 DISCLAIMER = "Information only, not investment advice."
 
 
+def lead_quote(fields: dict) -> str | None:
+    """The verbatim quote shown with a signal: the one behind the headline, else the first one stored."""
+    quotes = (fields or {}).get("_quotes") or {}
+    return quotes.get("headline") or next(iter(quotes.values()), None)
+
+
+def source_domain(url: str) -> str:
+    return urlparse(url or "").netloc.removeprefix("www.")
+
+
 def format_signal(sig, dashboard_url: str) -> str:
-    """sig is a signals row joined with documents (url)."""
+    """sig is a signals row joined with documents (url). Carries the source link and a verbatim quote."""
     e = html.escape
     breakdown = json.loads(sig["breakdown"])
     why = "\n".join(f"  {'+' if p >= 0 else ''}{p}  {e(label)}" for label, p in breakdown)
+    quote = lead_quote(json.loads(sig["fields"]))
+    quote_line = f"\u201c{e(quote)}\u201d\n\n" if quote else ""
     return (
         f"<b>{e(sig['ticker'])}</b>  score {sig['score']}\n"
         f"{e(sig['headline'])}\n\n"
+        f"{quote_line}"
         f"<b>Why this score</b>\n<pre>{why}</pre>\n"
-        f'<a href="{e(sig["url"])}">Source</a>  |  <a href="{e(dashboard_url)}">Dashboard</a>\n'
+        f'<a href="{e(sig["url"])}">Source ({e(source_domain(sig["url"]))})</a>  |  '
+        f'<a href="{e(dashboard_url)}">Dashboard</a>\n'
         f"<i>{DISCLAIMER}</i>"
     )
 

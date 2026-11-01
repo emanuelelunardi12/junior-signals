@@ -14,7 +14,7 @@ def signals_for(user_id: int, days: int = 7):
         """SELECT s.*, d.url FROM signals s
            JOIN documents d ON d.id = s.document_id
            JOIN watchlist w ON w.symbol = s.ticker AND w.user_id = ?
-           WHERE s.status='approved' AND s.tier!='archive' AND s.created_at >= ?
+           WHERE s.status='published' AND s.tier!='archive' AND s.created_at >= ?
            ORDER BY s.score DESC, s.created_at DESC LIMIT 15""",
         (user_id, _since(days)),
     ).fetchall()

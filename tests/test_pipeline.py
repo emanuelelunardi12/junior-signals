@@ -35,21 +35,22 @@ def test_quote_check_is_whitespace_and_quote_tolerant():
     assert not ai.quote_in_doc("right to nominate two directors", DOC)
 
 
-def test_end_to_end_alert_goes_to_review_then_publishes(monkeypatch, fresh_db):
+def test_end_to_end_alert_publishes_automatically(monkeypatch, fresh_db):
+    """The alert path has no human gate: an alert-tier document is live and on Telegram after one run."""
     fake_calls(monkeypatch)
     bot.handle_command({"id": 7, "first_name": "Ana"}, 7, "/start")
     bot.handle_command({"id": 7}, 7, "/add exmp.v")
-    collectors.save_document("EXMP.V", "manual", "https://example.com/1", "Strategic investment", None, DOC)
-    pipeline.run(collect=False)
-    s = db.get().execute("SELECT * FROM signals").fetchone()
-    assert s["tier"] == "alert" and s["status"] == "pending_review"
     fresh_db.clear()
-    with db.tx() as c:
-        c.execute("UPDATE signals SET status='approved' WHERE id=?", (s["id"],))
+    collectors.save_document("EXMP.V", "manual", "https://example.com/1", "Strategic investment", None, DOC)
+    summary = pipeline.run(collect=False)
+    s = db.get().execute("SELECT * FROM signals").fetchone()
+    assert s["tier"] == "alert" and s["status"] == "published" and s["published_at"]
+    assert summary["published"] == 1
+    assert [uid for uid, _ in fresh_db] == [7] and "EXMP.V" in fresh_db[0][1]
+    assert "approximately 9.9%" in fresh_db[0][1]          # the verbatim quote travels with the alert
     from app import publish
-    assert publish.publish_signal(s["id"]) == 1
-    assert publish.publish_signal(s["id"]) == 0  # never sent twice
-    assert "EXMP.V" in fresh_db[0][1]
+    assert publish.go_live(s["id"]) == 0                   # never sent twice
+    assert db.get().execute("SELECT COUNT(*) n FROM deliveries").fetchone()["n"] == 1
 
 
 def test_invented_quote_is_rejected(monkeypatch):

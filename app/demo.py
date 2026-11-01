@@ -28,13 +28,13 @@ DEMO = [
     ("EXMP.V", "strategic_investment", STRATEGIC_FIELDS["headline"][0],
      [["Strategic investment", 5], ["Investor is a major producer", 1], ["Priced at a premium to market", 2],
       ["Investor gets board seat, top-up rights or standstill", 2], ["First time this investor appears", 1]],
-     "alert", "approved", RELEASE, STRATEGIC_FIELDS),
+     "alert", "published", RELEASE, STRATEGIC_FIELDS),
     ("EXMP.V", "key_hire_ma", "Example Copper appointed a VP Corporate Development with prior M&A experience.",
-     [["M&A-type hire", 3], ["1 other signal in the last 60 days", 2]], "feed", "approved", None, None),
+     [["M&A-type hire", 3], ["1 other signal in the last 60 days", 2]], "feed", "published", None, None),
     ("DEMO", "private_placement", "Demo Energy closed a C$4 million private placement of units with full warrants.",
-     [["Private placement", 1], ["Discount with full warrants (routine dilution)", -1]], "archive", "approved", None, None),
+     [["Private placement", 1], ["Discount with full warrants (routine dilution)", -1]], "archive", "published", None, None),
     ("DEMO", "ownership_threshold", "A fund reported crossing 10% ownership of Demo Energy in an early warning report.",
-     [["Ownership threshold crossed", 4], ["First time this investor appears", 1]], "feed", "pending_review", None, None),
+     [["Ownership threshold crossed", 4], ["First time this investor appears", 1]], "feed", "draft", None, None),
 ]
 
 DEMO_TICKERS = ["EXMP.V", "DEMO"]
@@ -58,13 +58,14 @@ def seed(user_id: int | None = None) -> int:
             if fields:
                 stored = {k: v for k, (v, _) in fields.items()}
                 stored["_quotes"] = {k: q for k, (_, q) in fields.items()}
-            else:
-                stored = {"headline": headline}
+            else:  # the demo document's text is the headline itself, so the headline is its verbatim quote
+                stored = {"headline": headline, "_quotes": {"headline": headline}}
             c.execute(
                 "INSERT INTO signals (document_id, ticker, event_type, headline, fields, score, breakdown, tier, status, "
-                "dedupe_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "dedupe_key, created_at, published_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (cur.lastrowid, ticker, event, headline, json.dumps(stored), sum(p for _, p in breakdown),
-                 json.dumps(breakdown), tier, status, f"demo{i}", db.now()))
+                 json.dumps(breakdown), tier, status, f"demo{i}", db.now(),
+                 db.now() if status == "published" else None))
             added += 1
     if user_id is not None:
         for t in DEMO_TICKERS:

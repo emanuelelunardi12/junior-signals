@@ -59,6 +59,9 @@ def field_value(key: str, value) -> str:
 
 templates.env.filters["field_label"] = field_label
 templates.env.globals["field_value"] = field_value
+templates.env.globals["lead_quote"] = telegram.lead_quote
+templates.env.globals["source_domain"] = telegram.source_domain
+templates.env.globals["event_types"] = scoring.EVENT_TYPES
 
 
 def current_user(request: Request):
@@ -153,12 +156,12 @@ def dashboard(request: Request, t: str | None = None):
         # a single ticker tab also shows low-score (archive) signals
         signals = c.execute(
             """SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
-               WHERE s.ticker=? AND s.status='approved' ORDER BY s.created_at DESC LIMIT 100""", (active,)).fetchall()
+               WHERE s.ticker=? AND s.status='published' ORDER BY s.created_at DESC LIMIT 100""", (active,)).fetchall()
     elif wl:
         q = ",".join("?" * len(wl))
         signals = c.execute(
             f"""SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
-                WHERE s.ticker IN ({q}) AND s.status='approved' AND s.tier!='archive'
+                WHERE s.ticker IN ({q}) AND s.status='published' AND s.tier!='archive'
                 ORDER BY s.created_at DESC LIMIT 100""", wl).fetchall()
     else:
         signals = []
@@ -214,7 +217,9 @@ def web_feedback(request: Request, signal_id: int, useful: int):
     return RedirectResponse(request.headers.get("referer", "/dashboard"), status_code=303)
 
 
-# ---------------- admin review ----------------
+# ---------------- admin ----------------
+# Publishing is automatic, so /admin is not a gate. It shows what went live, what the red lines withheld,
+# the founder's own hand-made drafts, and lets a founder retract a live signal after the fact.
 
 REVIEWER_LABEL = "Reviewer adjustment"
 
@@ -237,16 +242,21 @@ def admin(request: Request):
     if not user or not is_admin(user["id"]):
         return _home()
     c = db.get()
-    pending = c.execute(
+    drafts = c.execute(
         """SELECT s.*, d.url, d.title AS doc_title FROM signals s JOIN documents d ON d.id=s.document_id
-           WHERE s.status='pending_review' ORDER BY s.score DESC, s.created_at""").fetchall()
+           WHERE s.status='draft' ORDER BY s.score DESC, s.created_at""").fetchall()
     reach = {s["id"]: {m: len(publish.recipients(s["ticker"], s["score"], m)) for m in ("watchers", "broadcast")}
-             for s in pending}
-    recent = c.execute(
+             for s in drafts}
+    live = c.execute(
+        """SELECT s.*, d.url, (SELECT COUNT(*) FROM deliveries x WHERE x.signal_id=s.id) AS sent
+           FROM signals s JOIN documents d ON d.id=s.document_id
+           WHERE s.status='published' ORDER BY s.published_at DESC, s.id DESC LIMIT 30""").fetchall()
+    withheld = c.execute(
         """SELECT s.*, d.url FROM signals s JOIN documents d ON d.id=s.document_id
-           WHERE s.status!='pending_review' ORDER BY s.created_at DESC LIMIT 30""").fetchall()
+           WHERE s.status IN ('withheld','retracted','rejected') ORDER BY s.id DESC LIMIT 15""").fetchall()
     stats = {
         "docs": c.execute("SELECT status, COUNT(*) n FROM documents GROUP BY status").fetchall(),
+        "signals": c.execute("SELECT status, COUNT(*) n FROM signals GROUP BY status").fetchall(),
         "feedback": c.execute("SELECT SUM(useful) up, COUNT(*) n FROM feedback").fetchone(),
         "usage": c.execute("""SELECT stage, model, SUM(input_tokens) i, SUM(output_tokens) o, COUNT(*) calls
                               FROM ai_usage GROUP BY stage, model""").fetchall(),
@@ -258,8 +268,8 @@ def admin(request: Request):
     # Documents the classifier called noise. Checking a sample catches missed events, which no other check does.
     noise = c.execute("""SELECT * FROM documents WHERE status='noise' ORDER BY id DESC LIMIT 15""").fetchall()
     return templates.TemplateResponse(request, "admin.html", {
-        "user": user, "admin": True, "pending": pending, "reach": reach, "recent": recent, "stats": stats,
-        "announcements": announcements, "noise": noise, "msg": request.query_params.get("msg"),
+        "user": user, "admin": True, "drafts": drafts, "reach": reach, "live": live, "withheld": withheld,
+        "stats": stats, "announcements": announcements, "noise": noise, "msg": request.query_params.get("msg"),
         "universe": c.execute("SELECT symbol, name FROM tickers ORDER BY symbol").fetchall(),
         "event_types": scoring.EVENT_TYPES,
     })
@@ -268,18 +278,20 @@ def admin(request: Request):
 @app.post("/admin/signal/{signal_id}/edit")
 def admin_edit(request: Request, signal_id: int, headline: str = Form(...),
                adjustment: int = Form(0), reason: str = Form("")):
+    """Edit one of the founder's own drafts. Live pipeline signals are never edited in place."""
     _admin_or_403(request)
-    s = db.get().execute("SELECT * FROM signals WHERE id=? AND status='pending_review'", (signal_id,)).fetchone()
+    s = db.get().execute("SELECT * FROM signals WHERE id=? AND status='draft'", (signal_id,)).fetchone()
     if s is None:
-        return _back("That signal is no longer in the queue.")
-    headline = headline.strip()
+        return _back("That draft is no longer waiting.")
+    headline = headline.strip()[:300]
     if not headline:
         return _back("The headline can't be empty.")
     if adjustment and not reason.strip():
         return _back("Add a reason for the score adjustment. Users see it in the breakdown.")
+    adjustment = max(-10, min(int(adjustment), 10))
     parts = [p for p in json.loads(s["breakdown"]) if not p[0].startswith(REVIEWER_LABEL)]
     if adjustment:
-        parts.append([f"{REVIEWER_LABEL}: {reason.strip()}", int(adjustment)])
+        parts.append([f"{REVIEWER_LABEL}: {reason.strip()[:120]}", adjustment])
     score = sum(p for _, p in parts)
     with db.tx() as c:
         c.execute("UPDATE signals SET headline=?, breakdown=?, score=?, tier=? WHERE id=?",
@@ -287,22 +299,42 @@ def admin_edit(request: Request, signal_id: int, headline: str = Form(...),
     return _back(f"Saved. Score is now {score}.")
 
 
+@app.post("/admin/signal/{signal_id}/retract")
+def admin_retract(request: Request, signal_id: int, reason: str = Form("")):
+    """After-the-fact correction of a live signal. Not part of the alert path: the alert already went out."""
+    _admin_or_403(request)
+    reason = reason.strip()[:300]
+    if not reason:
+        return _back("Give a reason. Everyone who received the signal gets it as a correction.")
+    if db.get().execute("SELECT 1 FROM signals WHERE id=? AND status='published'", (signal_id,)).fetchone() is None:
+        return _back("That signal is not live.")
+    sent = publish.retract(signal_id, reason)
+    return _back(f"Retracted. Correction sent to {sent} user{'s' if sent != 1 else ''}.")
+
+
 @app.post("/admin/signal/{signal_id}/{action}")
 def admin_action(request: Request, signal_id: int, action: str):
-    user = _admin_or_403(request)
+    """Send or discard one of the founder's own drafts."""
+    _admin_or_403(request)
     delivery = {"send": "watchers", "feed": "feed_only", "broadcast": "broadcast"}.get(action)
     if action not in {"send", "feed", "broadcast", "reject"}:
         raise HTTPException(404)
+    user = current_user(request)
     with db.tx() as c:
-        cur = c.execute(
-            "UPDATE signals SET status=?, reviewed_by=?, delivery=COALESCE(?, delivery) "
-            "WHERE id=? AND status='pending_review'",
-            ("rejected" if action == "reject" else "approved", user["id"], delivery, signal_id))
+        if action == "reject":
+            cur = c.execute("UPDATE signals SET status='rejected', reviewed_by=? WHERE id=? AND status='draft'",
+                            (user["id"], signal_id))
+        else:
+            cur = c.execute("UPDATE signals SET reviewed_by=?, delivery=? WHERE id=? AND status='draft'",
+                            (user["id"], delivery, signal_id))
     if not cur.rowcount:
-        return _back("That signal is no longer in the queue.")
+        return _back("That draft is no longer waiting.")
     if action == "reject":
-        return _back("Rejected. Nothing was sent.")
-    sent = publish.publish_signal(signal_id)
+        return _back("Discarded. Nothing was sent.")
+    sent = publish.go_live(signal_id)
+    status = db.get().execute("SELECT status, status_note FROM signals WHERE id=?", (signal_id,)).fetchone()
+    if status["status"] == "withheld":
+        return _back(f"Not published: {status['status_note']}")
     if action == "feed":
         return _back("Added to the dashboard feed. Nothing was sent to Telegram.")
     return _back(f"Sent to {sent} user{'s' if sent != 1 else ''}.")
@@ -329,7 +361,7 @@ def admin_new(request: Request, ticker: str = Form(...), url: str = Form(...), t
                       (ticker.upper(), title.strip(), text, old["id"]))
     doc = db.get().execute("SELECT * FROM documents WHERE url=?", (url,)).fetchone()
     try:
-        signal_id = pipeline.process_document(doc, event_type=event_type, force_review=True, skip_dedupe=True)
+        signal_id = pipeline.process_document(doc, event_type=event_type, draft=True, skip_dedupe=True)
     except Exception as exc:
         with db.tx() as c:
             c.execute("UPDATE documents SET status='failed' WHERE id=?", (doc["id"],))
@@ -337,7 +369,7 @@ def admin_new(request: Request, ticker: str = Form(...), url: str = Form(...), t
     if signal_id is None:
         return _back("The AI classified this as noise, so no signal was created. "
                      "If you disagree, submit it again and choose the event type yourself.")
-    return _back("Signal created. Review it below before sending.")
+    return _back("Draft created. Check it above, then choose how to send it.")
 
 
 @app.post("/admin/noise/{doc_id}/promote")
@@ -351,10 +383,10 @@ def admin_promote_noise(request: Request, doc_id: int, event_type: str = Form(..
     if event_type not in scoring.EVENT_TYPES:
         return _back("Choose an event type.")
     try:
-        signal_id = pipeline.process_document(doc, event_type=event_type, force_review=True, skip_dedupe=True)
+        signal_id = pipeline.process_document(doc, event_type=event_type, draft=True, skip_dedupe=True)
     except Exception as exc:
         return _back(f"Processing failed: {exc}")
-    return _back("Signal created from a document the AI had skipped. Review it above."
+    return _back("Draft created from a document the AI had skipped. Check it above."
                  if signal_id else "Nothing could be extracted from that document.")
 
 

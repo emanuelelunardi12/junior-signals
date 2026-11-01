@@ -9,8 +9,9 @@ Telegram bot and a dashboard. Users sign up with Telegram only; the Telegram use
 - `app/ai.py` classify → extract (Maker, every field has a verbatim quote) → deterministic quote check → Grader → one retry.
 - `app/scoring.py` transparent points; all weights in `WEIGHTS`/`THRESHOLDS`. Breakdown is shown to users.
 - `app/pipeline.py` orchestration, dedupe, context (cluster, first-time holder), tiering.
-- `app/publish.py` delivery modes per signal (`watchers`, `feed_only`, `broadcast`) and announcements; never sends twice.
-- `/admin` in `app/web.py`: edit headline, reviewer score adjustment (stored as a breakdown line with reason), publish options, manual signal creation, announcements.
+- `app/publish.py` `go_live()`: AUTOMATIC publishing (no human gate) after the red-line checks in `app/guardrails.py`;
+  delivery modes (`watchers`, `feed_only`, `broadcast`); `deliveries` table so nothing is sent twice; `retract()` sends corrections.
+- `/admin` in `app/web.py`: live feed with retract, withheld list, founder drafts (only hand-made signals), manual signal creation, announcements.
 - `app/bot.py` Telegram commands and feedback buttons. `app/telegram.py` API client + login signature check.
 - `app/web.py` FastAPI dashboard, admin review, webhook. Templates in `app/templates`, CSS in `app/static`.
 - `app/digest.py` weekly summary per user; `app/retro.py` back-test over historical documents (never delivers).
@@ -19,8 +20,10 @@ Telegram bot and a dashboard. Users sign up with Telegram only; the Telegram use
 - SQLite via plain sqlite3 (`app/db.py`). Deployment: `Dockerfile`, `render.yaml`, GitHub Actions test workflow.
 
 ## Rules to keep
-- Never publish a signal without a source link; never phrase anything as buy/sell advice.
-- Alert-tier (score >= 8) signals always go through human review in `/admin`.
+- RED LINES (enforced in `guardrails.py`, checked in `publish.go_live`): every published signal has an http(s) source link
+  and a verbatim quote found in the document; nothing reads as buy/sell advice. Failing signals are withheld automatically.
+- The alert path is automatic by design: never add a human approval step between scoring and publishing.
+  The human sits in the LEARNING path: scoring-weight changes need founder approval in `/admin/tuning`.
 - A field is kept only if its quote is found in the document AND the Grader supports it.
 - Keep scoring rule-based and explainable; log every prompt/weight change in `docs/prompt_log.md`.
 - Verify the Telegram login hash before creating a session. Check the webhook secret header.

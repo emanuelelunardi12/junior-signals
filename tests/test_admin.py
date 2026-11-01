@@ -16,9 +16,11 @@ def admin_client(monkeypatch):
 
 
 def make_pending(monkeypatch):
+    """A founder-authored draft: the only kind of signal that waits for a person since 1 Nov 2026."""
     fake_calls(monkeypatch)
     collectors.save_document("EXMP.V", "manual", "https://example.com/p", "t", None, DOC)
-    pipeline.run(collect=False)
+    doc = db.get().execute("SELECT * FROM documents").fetchone()
+    pipeline.process_document(doc, draft=True)
     return db.get().execute("SELECT * FROM signals").fetchone()
 
 
@@ -73,7 +75,7 @@ def test_feed_only_sends_nothing(monkeypatch, fresh_db):
     fresh_db.clear()
     c.post(f"/admin/signal/{s['id']}/feed")
     assert fresh_db == []
-    assert db.get().execute("SELECT status, delivery FROM signals").fetchone()[:] == ("approved", "feed_only")
+    assert db.get().execute("SELECT status, delivery FROM signals").fetchone()[:] == ("published", "feed_only")
 
 
 def test_broadcast_reaches_everyone(monkeypatch, fresh_db):
@@ -90,9 +92,9 @@ def test_create_signal_from_admin(monkeypatch):
     c = admin_client(monkeypatch)
     r = c.post("/admin/new", data={"ticker": "EXMP.V", "url": "https://sedarplus.ca/x", "title": "Stake",
                                    "text": DOC, "event_type": "strategic_investment"})
-    assert "Signal created" in r.text
+    assert "Draft created" in r.text
     s = db.get().execute("SELECT * FROM signals").fetchone()
-    assert s["status"] == "pending_review"
+    assert s["status"] == "draft"
     assert c.post("/admin/new", data={"ticker": "EXMP.V", "url": "https://sedarplus.ca/x", "text": DOC}).text.count("already exists") == 1
 
 
@@ -109,8 +111,19 @@ def test_announcement(monkeypatch, fresh_db):
     assert db.get().execute("SELECT recipients FROM announcements").fetchone()["recipients"] == 3
 
 
-def test_old_database_gets_new_column():
+def test_old_database_gets_new_columns_and_statuses():
+    """A database from before 1 Nov 2026 upgrades: new columns, and the old review statuses are renamed."""
     conn = db.connect(":memory:")
-    conn.executescript(db.SCHEMA.replace(",\n    delivery     TEXT NOT NULL DEFAULT 'watchers'   -- watchers | feed_only | broadcast", ""))
+    conn.executescript("""
+        CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL, ticker TEXT NOT NULL,
+            event_type TEXT NOT NULL, headline TEXT NOT NULL, fields TEXT NOT NULL, rejected TEXT NOT NULL DEFAULT '[]',
+            score INTEGER NOT NULL, breakdown TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL, created_at TEXT NOT NULL, reviewed_by INTEGER, published_at TEXT);
+        INSERT INTO signals (document_id, ticker, event_type, headline, fields, score, breakdown, tier, status,
+            dedupe_key, created_at) VALUES (1,'X','private_placement','h','{}',1,'[]','feed','approved','k','2026'),
+            (1,'X','private_placement','h','{}',9,'[]','alert','pending_review','k2','2026');
+    """)
     db.init(conn)
-    assert "delivery" in {r["name"] for r in conn.execute("PRAGMA table_info(signals)")}
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(signals)")}
+    assert {"delivery", "status_note"} <= cols
+    assert [r["status"] for r in conn.execute("SELECT status FROM signals ORDER BY id")] == ["published", "draft"]

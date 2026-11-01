@@ -62,12 +62,13 @@ CREATE TABLE IF NOT EXISTS signals (
     score        INTEGER NOT NULL,
     breakdown    TEXT NOT NULL,                  -- JSON: [[label, points], ...]
     tier         TEXT NOT NULL,                  -- alert | feed | archive
-    status       TEXT NOT NULL,                  -- pending_review | approved | rejected
+    status       TEXT NOT NULL,                  -- queued | published | withheld | retracted | draft | rejected | retro
     dedupe_key   TEXT NOT NULL,
     created_at   TEXT NOT NULL,
     reviewed_by  INTEGER,
     published_at TEXT,
-    delivery     TEXT NOT NULL DEFAULT 'watchers'   -- watchers | feed_only | broadcast
+    delivery     TEXT NOT NULL DEFAULT 'watchers',  -- watchers | feed_only | broadcast
+    status_note  TEXT                            -- why a signal was withheld or retracted
 );
 CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker, created_at);
 CREATE TABLE IF NOT EXISTS feedback (
@@ -75,6 +76,14 @@ CREATE TABLE IF NOT EXISTS feedback (
     user_id    INTEGER NOT NULL,
     useful     INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    PRIMARY KEY (signal_id, user_id)
+);
+-- One row per Telegram message sent for a signal: never twice to the same user, and corrections reach
+-- exactly the people who got the original.
+CREATE TABLE IF NOT EXISTS deliveries (
+    signal_id  INTEGER NOT NULL REFERENCES signals(id),
+    user_id    INTEGER NOT NULL,
+    sent_at    TEXT NOT NULL,
     PRIMARY KEY (signal_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS announcements (
@@ -141,6 +150,15 @@ MIGRATIONS = [
     # (table, column, definition) added after the first version; applied to older databases
     ("signals", "delivery", "TEXT NOT NULL DEFAULT 'watchers'"),
     ("tickers", "price_symbol", "TEXT"),
+    ("signals", "status_note", "TEXT"),
+]
+
+# Data changes for older databases. Each statement is idempotent.
+DATA_MIGRATIONS = [
+    # 1 Nov 2026: publishing became automatic. 'approved' meant "a person approved it"; it is now 'published'.
+    "UPDATE signals SET status='published' WHERE status='approved'",
+    # Alert-tier signals that were waiting for review under the old rule become founder drafts.
+    "UPDATE signals SET status='draft' WHERE status='pending_review'",
 ]
 
 
@@ -150,6 +168,8 @@ def init(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    for statement in DATA_MIGRATIONS:
+        conn.execute(statement)
     conn.commit()
 
 
@@ -201,6 +221,7 @@ def delete_user(user_id: int) -> None:
     with tx() as c:
         c.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
         c.execute("DELETE FROM feedback WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM deliveries WHERE user_id=?", (user_id,))
         c.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 

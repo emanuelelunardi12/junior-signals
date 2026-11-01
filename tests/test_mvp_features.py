@@ -21,11 +21,8 @@ def admin_client(monkeypatch):
 def make_signal(monkeypatch, url="https://example.com/x"):
     fake_calls(monkeypatch)
     collectors.save_document("EXMP.V", "manual", url, "t", None, DOC)
-    pipeline.run(collect=False)
-    s = db.get().execute("SELECT * FROM signals ORDER BY id DESC").fetchone()
-    with db.tx() as c:
-        c.execute("UPDATE signals SET status='approved' WHERE id=?", (s["id"],))
-    return db.get().execute("SELECT * FROM signals WHERE id=?", (s["id"],)).fetchone()
+    pipeline.run(collect=False)  # publishes automatically
+    return db.get().execute("SELECT * FROM signals ORDER BY id DESC").fetchone()
 
 
 # ---------------- weekly digest ----------------
@@ -121,8 +118,8 @@ def test_promote_document_the_ai_skipped(monkeypatch):
     assert doc["status"] == "noise"
     c = admin_client(monkeypatch)
     r = c.post(f"/admin/noise/{doc['id']}/promote", data={"event_type": "strategic_investment"})
-    assert "Signal created" in r.text
-    assert db.get().execute("SELECT status FROM signals").fetchone()["status"] == "pending_review"
+    assert "Draft created" in r.text
+    assert db.get().execute("SELECT status FROM signals").fetchone()["status"] == "draft"
 
 
 # ---------------- tuning report ----------------
