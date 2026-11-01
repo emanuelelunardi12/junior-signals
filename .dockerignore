@@ -1,0 +1,14 @@
+# Never ship local secrets, databases or tooling into the image
+.env
+.env.*
+!.env.example
+data/
+.venv/
+__pycache__/
+.pytest_cache/
+.git/
+.github/
+docs/*.png
+retro_data/*.txt
+eval_data/docs/*
+!eval_data/docs/example_strategic.txt

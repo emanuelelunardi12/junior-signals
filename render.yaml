@@ -1,10 +1,14 @@
-# Render deployment. Set the secret variables in the dashboard, never in this file.
+# Render Blueprint. Secrets are set in the Render dashboard (sync: false), never in this file.
+# Cost (render.com/pricing, Nov 2026): instance "starter" (0.5 CPU, 512 MB) about $7/month plus the 1 GB disk at
+# $0.25/GB/month. The free instance type cannot keep the SQLite file across deploys, so it is not used.
 services:
   - type: web
     name: junior-signals
     runtime: docker
-    plan: starter            # a paid plan is needed for the persistent disk below
-    healthCheckPath: /
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /healthz
+    autoDeploy: true
     disk:
       name: data
       mountPath: /data       # keeps the SQLite database across deploys
@@ -15,22 +19,29 @@ services:
       - key: RUN_SCHEDULER
         value: "1"
       - key: PIPELINE_INTERVAL_HOURS
-        value: "4"
+        value: "0.5"         # speed is the edge: check sources every 30 minutes, publish as soon as scored
+      - key: LEARNING_INTERVAL_HOURS
+        value: "24"          # proposes weight changes only; a founder approves in /admin/tuning
+      - key: INSIGHTS_INTERVAL_HOURS
+        value: "168"         # weekly AI insight job, suggestion-only
+      - key: BEHAVIOUR_RETENTION_DAYS
+        value: "180"
+      - key: LISTINGS_AUTOLOAD
+        value: "1"           # downloads the SEC NASDAQ/NYSE list on first start
       - key: DEV_LOGIN
-        value: "0"
+        value: "0"           # forced off on any https BASE_URL anyway
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_BOT_USERNAME
         sync: false
-      - key: TELEGRAM_WEBHOOK_SECRET
-        sync: false
-      - key: SESSION_SECRET
-        generateValue: true
       - key: ADMIN_IDS
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: BASE_URL
-        sync: false
       - key: SEC_USER_AGENT
-        sync: false
+        sync: false          # "JuniorSignals <your contact email>" (SEC fair-access rule)
+      # BASE_URL is optional: Render provides RENDER_EXTERNAL_URL and the app uses it.

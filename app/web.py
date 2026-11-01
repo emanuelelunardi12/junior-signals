@@ -1,10 +1,13 @@
 """Web dashboard + Telegram webhook. Run with: uvicorn app.web:app --reload"""
+import hmac
 import json
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -17,6 +20,9 @@ HERE = Path(__file__).parent
 @asynccontextmanager
 async def lifespan(_app):
     print(config.describe())
+    problems = config.deployment_problems()
+    if problems:
+        raise RuntimeError("Unsafe settings for a public deployment:\n- " + "\n- ".join(problems))
     db.get()
     db.sync_universe()
     if config.LISTINGS_AUTOLOAD and not db.get().execute("SELECT 1 FROM listings WHERE source='sec' LIMIT 1").fetchone():
@@ -32,9 +38,23 @@ async def lifespan(_app):
         sched.shutdown(wait=False)
 
 
-app = FastAPI(title="Junior Signals", lifespan=lifespan)
+app = FastAPI(title="Junior Signals", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def protect(request: Request, call_next):
+    """Body size cap, same-origin check for state-changing requests, security headers on every response."""
+    if int(request.headers.get("content-length") or 0) > security.MAX_BODY:
+        return PlainTextResponse("Request too large", status_code=413)
+    if not security.same_origin(request, config.BASE_URL):
+        return PlainTextResponse("Cross-site request refused", status_code=403)
+    response = await call_next(request)
+    security.add_headers(response, https=config.PUBLIC)
+    return response
+
+
 app.add_middleware(SessionMiddleware, secret_key=config.SESSION_SECRET, max_age=60 * 60 * 24 * 30,
-                   https_only=config.BASE_URL.startswith("https"), same_site="lax")
+                   https_only=config.PUBLIC, same_site="lax", session_cookie="js_session")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 templates = Jinja2Templates(directory=HERE / "templates")
 templates.env.filters["fromjson"] = json.loads
@@ -81,11 +101,46 @@ def current_user(request: Request):
 
 
 def is_admin(uid: int) -> bool:
-    return uid in config.ADMIN_IDS or (config.DEV_LOGIN and not config.ADMIN_IDS)
+    """Founders listed in ADMIN_IDS. Locally, with the test login on and no ADMIN_IDS, everyone is admin
+    (DEV_LOGIN can never be on for a public https deployment, see config.py)."""
+    return uid in config.ADMIN_IDS or (config.DEV_LOGIN and not config.ADMIN_IDS and not config.PUBLIC)
 
 
 def _home():
     return RedirectResponse("/", status_code=303)
+
+
+# ---------------- errors and health ----------------
+
+ERROR_TEXT = {403: "You don't have access to that page.", 404: "That page doesn't exist.",
+              405: "That action isn't available here.", 413: "That was too large.", 429: "Too many requests. Slow down a little."}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException):
+    msg = ERROR_TEXT.get(exc.status_code, "Something went wrong.")
+    if request.url.path.startswith("/api/") or _wants_json(request):
+        return JSONResponse({"error": msg}, status_code=exc.status_code)
+    user = current_user(request) if "session" in request.scope else None
+    return templates.TemplateResponse(request, "error.html", {"status": exc.status_code, "message": msg, "user": user},
+                                      status_code=exc.status_code)
+
+
+@app.exception_handler(Exception)
+async def server_error(request: Request, exc: Exception):
+    traceback.print_exception(exc)   # details go to the server log, never to the browser
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"error": "Server error"}, status_code=500)
+    return templates.TemplateResponse(request, "error.html", {"status": 500, "user": None,
+                                      "message": "Something went wrong on our side. Try again in a minute."},
+                                      status_code=500)
+
+
+@app.get("/healthz")
+def healthz():
+    """For the host's health check: the process is up and the database answers."""
+    db.get().execute("SELECT 1").fetchone()
+    return {"ok": True}
 
 
 # ---------------- login ----------------
@@ -120,6 +175,8 @@ def _start_session(request: Request, uid: int, first_name: str | None, username:
 
 @app.get("/auth/telegram")
 def auth_telegram(request: Request):
+    if _limited(request, "login"):
+        return RedirectResponse("/?error=login", status_code=303)
     data = telegram.verify_login(dict(request.query_params))
     if data is None:
         return RedirectResponse("/?error=login", status_code=303)
@@ -131,7 +188,7 @@ def auth_telegram(request: Request):
 def dev_login(request: Request, user_id: int = Form(...), first_name: str = Form("Test")):
     if not config.DEV_LOGIN:
         raise HTTPException(404)
-    db.upsert_user(user_id, first_name, None)
+    db.upsert_user(user_id, first_name[:64], None)
     request.session.clear()
     request.session["uid"] = user_id
     request.session["sid"] = behaviour.new_session_id()
@@ -506,13 +563,18 @@ def admin_new(request: Request, ticker: str = Form(...), url: str = Form(...), t
               title: str = Form(""), event_type: str = Form("auto")):
     _admin_or_403(request)
     from app import collectors, pipeline
-    url, text = url.strip(), text.strip()
-    if not db.ticker_exists(ticker):
-        return _back(f"{ticker} is not in universe.yaml.")
-    if not url.startswith(("http://", "https://")):
+    from app import guardrails
+    url, text, title = url.strip()[:1000], text.strip(), title.strip()[:300]
+    sym = clean_symbol(ticker)
+    if not sym or not db.ticker_exists(sym):
+        return _back(f"{ticker[:20]} is not a known listing. Load it or add it to universe.yaml first.")
+    ticker = sym
+    if not guardrails.is_primary_source(url):
         return _back("Add the link to the original source. Every signal needs one.")
     if len(text) < 80:
         return _back("Paste the full text of the document, not just a summary.")
+    if len(text) > 300_000:
+        return _back("That document is very long; paste the relevant release or filing only.")
     if not collectors.save_document(ticker.upper(), "manual", url, title.strip(), None, text):
         old = db.get().execute("SELECT * FROM documents WHERE url=?", (url,)).fetchone()
         if old["status"] not in ("noise", "failed"):
@@ -665,6 +727,19 @@ def admin_insight_propose(request: Request, insight_id: int, index: int):
     return _tuning_back("Proposal created from the AI suggestion. Approve or reject it here.")
 
 
+@app.post("/admin/webhook")
+def admin_webhook(request: Request):
+    """Point Telegram at this deployment (same as `python -m app.cli set-webhook`, for hosts without a shell)."""
+    _admin_or_403(request)
+    if not (config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_WEBHOOK_SECRET and config.PUBLIC):
+        return _back("Needs TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET and an https BASE_URL.")
+    try:
+        telegram.set_webhook(f"{config.BASE_URL}/telegram/webhook")
+    except telegram.TelegramError as exc:
+        return _back(f"Telegram refused: {exc}")
+    return _back("Telegram webhook connected. Bot commands and button taps now reach this server.")
+
+
 @app.post("/admin/listings")
 async def admin_listings(request: Request):
     """Load a TSX/TSXV issuer list a founder downloaded by hand (TMX terms forbid automated download),
@@ -692,7 +767,7 @@ async def admin_listings(request: Request):
 @app.post("/admin/announce")
 def admin_announce(request: Request, text: str = Form(...)):
     user = _admin_or_403(request)
-    text = text.strip()
+    text = text.strip()[:1000]
     if not text:
         return _back("Write the announcement first.")
     sent = publish.send_announcement(text, user["id"])
@@ -703,7 +778,16 @@ def admin_announce(request: Request, text: str = Form(...)):
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str = Header(default="")):
-    if not config.TELEGRAM_WEBHOOK_SECRET or x_telegram_bot_api_secret_token != config.TELEGRAM_WEBHOOK_SECRET:
+    if not config.TELEGRAM_WEBHOOK_SECRET or not hmac.compare_digest(
+            x_telegram_bot_api_secret_token.encode(), config.TELEGRAM_WEBHOOK_SECRET.encode()):
         raise HTTPException(403)
-    bot.handle_update(await request.json())
+    try:
+        update = await request.json()
+    except ValueError:
+        return {"ok": True}   # never make Telegram retry a malformed update
+    if isinstance(update, dict):
+        try:
+            bot.handle_update(update)
+        except Exception as exc:  # one bad update must not block the queue: Telegram retries non-200s
+            print(f"[webhook] update failed: {exc}")
     return {"ok": True}

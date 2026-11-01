@@ -188,5 +188,9 @@
     <tr><th>AI usage</th><td>{% for u in stats.usage %}{{ u.stage }} ({{ u.model }}): {{ u.calls }} calls, {{ u.i }} in / {{ u.o }} out tokens<br>{% else %}none yet{% endfor %}</td></tr>
     <tr><th>Requested tickers</th><td>{% for r in stats.requests %}{{ r.symbol }} ({{ r.n }}){{ ', ' if not loop.last }}{% else %}none{% endfor %}</td></tr>
   </table>
+  <form method="post" action="/admin/webhook" class="inline-form" style="margin-top:1rem">
+    <button>Connect the Telegram webhook</button>
+    <span class="small">Run once after deploying or changing the bot. Same as <code>python -m app.cli set-webhook</code>.</span>
+  </form>
 </section>
 {% endblock %}

@@ -31,7 +31,9 @@ TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 ADMIN_IDS = _ids(os.getenv("ADMIN_IDS", ""))
 
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+# Render sets RENDER_EXTERNAL_URL automatically, so a fresh deploy knows its own address.
+BASE_URL = (os.getenv("BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:8000").rstrip("/")
+PUBLIC = BASE_URL.startswith("https://")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret")
 _DEV_LOGIN_SET = os.getenv("DEV_LOGIN", "") != ""
 DEV_LOGIN = os.getenv("DEV_LOGIN", "0") == "1"
@@ -56,6 +58,10 @@ if not _DEV_LOGIN_SET and _LOCAL and not TELEGRAM_BOT_TOKEN:
     # No settings file and nothing configured: this can only be a local machine, so allow the test login
     # rather than showing a page nobody can get past. Any real deployment has a bot token and a real BASE_URL.
     DEV_LOGIN = True
+DEV_LOGIN_BLOCKED = False
+if PUBLIC and DEV_LOGIN:
+    # The test login lets anyone become any user (and, with no ADMIN_IDS, an admin). Never on a public URL.
+    DEV_LOGIN, DEV_LOGIN_BLOCKED = False, True
 
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "JuniorSignals student project contact@example.com")
 DATABASE_PATH = ROOT / os.getenv("DATABASE_PATH", "data/signals.db")
@@ -71,11 +77,27 @@ BEHAVIOUR_RETENTION_DAYS = int(os.getenv("BEHAVIOUR_RETENTION_DAYS", "180"))
 MAX_DOC_CHARS = 40_000
 
 
+def deployment_problems() -> list[str]:
+    """Settings that make a PUBLIC deployment unsafe. The app refuses to start if any are found."""
+    if not PUBLIC:
+        return []
+    out = []
+    if SESSION_SECRET in ("", "dev-only-secret", "change-me-another-long-random-string") or len(SESSION_SECRET) < 32:
+        out.append("SESSION_SECRET must be a random string of at least 32 characters (Render can generate one).")
+    if TELEGRAM_BOT_TOKEN and not TELEGRAM_WEBHOOK_SECRET:
+        out.append("TELEGRAM_WEBHOOK_SECRET must be set when a bot token is configured.")
+    return out
+
+
 def describe() -> str:
     """One line printed at startup, so a misread .env is obvious straight away."""
     lines = [f"[config] DEV_LOGIN={'on' if DEV_LOGIN else 'off'}  bot="
              f"{TELEGRAM_BOT_USERNAME or 'not set'}  BASE_URL={BASE_URL}  db={DATABASE_PATH}"]
-    if not ENV_FILE_FOUND:
+    if DEV_LOGIN_BLOCKED:
+        lines.append("[config] DEV_LOGIN was requested but BASE_URL is public (https): the test login is OFF.")
+    if PUBLIC and not ADMIN_IDS:
+        lines.append("[config] ADMIN_IDS is empty: nobody can open /admin until you add your Telegram user id.")
+    if not ENV_FILE_FOUND and not PUBLIC:
         lines.append(f"[config] No .env file at {ENV_FILE}. Run: cp .env.example .env "
                      "to set your own options; the test login is on meanwhile because nothing is configured.")
     return "\n".join(lines)

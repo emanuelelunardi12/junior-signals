@@ -1,4 +1,4 @@
-"""Request-level protection: rate limits (and, from Part 5, headers and origin checks).
+"""Request-level protection: rate limits, security headers and a same-origin check on state-changing requests.
 
 The app runs as ONE process (see architecturedoc.md), so an in-memory limiter is enough and needs no Redis.
 If we ever run several workers, each gets its own buckets; limits then apply per worker.
@@ -6,6 +6,7 @@ If we ever run several workers, each gets its own buckets; limits then apply per
 import threading
 import time
 from collections import defaultdict
+from urllib.parse import urlparse
 
 # (requests, per seconds). Generous for a person, tight for a script.
 LIMITS = {
@@ -54,3 +55,59 @@ def client_key(request) -> str:
     """Who to rate-limit: the anonymous session if there is one, else the client address."""
     sid = request.session.get("sid") if "session" in request.scope else None
     return sid or (request.client.host if request.client else "unknown")
+
+
+# ---------------- headers ----------------
+# No inline scripts anywhere (confirm dialogs and tracking live in /static). Inline style attributes are used
+# for the score bars, so style-src allows them; that is low risk compared with inline script.
+CSP = "; ".join([
+    "default-src 'self'",
+    "script-src 'self' https://telegram.org",
+    "frame-src https://oauth.telegram.org",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: https://telegram.org https://*.telegram.org https://t.me",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+])
+
+
+def add_headers(response, https: bool) -> None:
+    h = response.headers
+    h.setdefault("Content-Security-Policy", CSP)
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+    h.setdefault("Cross-Origin-Opener-Policy", "same-origin-allow-popups")   # Telegram login opens a popup
+    if https:
+        h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+
+# ---------------- cross-site request protection ----------------
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+EXEMPT_PATHS = {"/telegram/webhook"}   # called by Telegram's servers; authenticated by its secret header
+
+
+def same_origin(request, base_url: str) -> bool:
+    """Reject state-changing requests that a browser marks as coming from another site.
+    Defence in depth on top of SameSite=Lax session cookies; requests without these headers (curl, tests,
+    old browsers) fall back to the cookie rules."""
+    if request.method in SAFE_METHODS or request.url.path in EXEMPT_PATHS:
+        return True
+    site = request.headers.get("sec-fetch-site")
+    if site and site not in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    if origin == "null":
+        return False
+    host = urlparse(origin).netloc
+    return host in {request.url.netloc, urlparse(base_url).netloc}
+
+
+MAX_BODY = 6_000_000   # largest legitimate body: a 5 MB listing CSV upload
